@@ -18,7 +18,7 @@ def create_parser(required_true=True):
         default_gpu = 0
     else:
         default_gpu = -1
-
+    print("def gpu", default_gpu, torch.cuda.is_available())
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument("--input", "-i", type=str, required=True, help="input video path")
     parser.add_argument("--output", "-o", type=str, required=True, help="output path")

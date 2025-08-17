@@ -8,6 +8,7 @@ from nunif.device import device_is_cuda
 def main():
     parser = create_parser()
     args = parser.parse_args()
+    print("args:  ",args)
     set_state_args(args)
     stlizer_main(args)
 
