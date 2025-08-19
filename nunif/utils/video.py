@@ -1,5 +1,6 @@
 import av
 from av.video.reformatter import ColorRange, Colorspace
+import cv2
 from packaging import version as packaging_version
 import os
 from os import path
@@ -665,7 +666,7 @@ def process_video(input_path, output_path,
                   vf="",
                   stop_event=None, suspend_event=None, tqdm_fn=None,
                   start_time=None, end_time=None,
-                  test_callback=None):
+                  test_callback=None, args=None):
     if isinstance(start_time, str):
         start_time = parse_time(start_time)
     if isinstance(end_time, str):
@@ -704,8 +705,15 @@ def process_video(input_path, output_path,
     if not config.video_codec:
         config.video_codec = get_default_video_codec(config.container_format)
     configure_video_codec(config)
-
-    output_container = av.open(output_path_tmp, 'w', options=config.container_options)
+    named_pipe = "\\\\.\\pipe\\" in output_path
+    if named_pipe:
+        print("Using pipe")
+        import io
+        buffer = io.BytesIO()
+        output_container = av.open(buffer, 'w', format="mp4")
+    else:
+        output_container = av.open(output_path_tmp, 'w', options=config.container_options)
+        
     fps_filter = FixedFPSFilter(video_input_stream, fps=config.fps, vf=vf)
     if config.output_width is not None and config.output_height is not None:
         output_size = config.output_width, config.output_height
@@ -716,7 +724,7 @@ def process_video(input_path, output_path,
         output_size = test_output_size(test_callback, video_input_stream, vf)
 
     output_fps = config.output_fps or config.fps
-    video_output_stream = output_container.add_stream(config.video_codec, output_fps)
+    video_output_stream = output_container.add_stream(config.video_codec if not named_pipe else "libx264", output_fps)
     configure_colorspace(video_output_stream, video_input_stream, config)
     video_output_stream.thread_type = "AUTO"
     video_output_stream.pix_fmt = config.pix_fmt
@@ -729,6 +737,8 @@ def process_video(input_path, output_path,
     # utvideo + flac crashes on windows media player
     # default_acodec = "flac" if config.container_format == "avi" else "aac"
     default_acodec = "aac"
+    # audio_input_stream = None
+
     if audio_input_stream is not None:
         if audio_input_stream.rate < 16000:
             audio_output_stream = output_container.add_stream(default_acodec, 16000)
@@ -752,23 +762,61 @@ def process_video(input_path, output_path,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
     streams = [s for s in [video_input_stream, audio_input_stream] if s is not None]
+    pt = time.time()
+    ct = pt
+    
+    import subprocess
+    from io import BytesIO
+    import win32file, win32pipe,threading
 
+
+    
+    # Write data to MPV's stdin
+
+
+    # # Example usage
+    # if __name__ == "__main__":
+    #     with open('sample.mp4', 'rb') as f:
+    #         bytes_io_data = BytesIO(f.read())
+        
+    #     play_bytesio_with_mpv_stdin(bytes_io_data)
+        
     for packet in input_container.demux(streams):
         if packet.pts is not None:
             if end_time is not None and packet.stream.type == "video" and end_time < packet.pts * packet.time_base:
                 break
         if packet.stream.type == "video":
+            # print("v")
             for frame in packet.decode():
                 frame = fps_filter.update(frame)
                 if frame is not None:
                     frame = frame.reformat(format="rgb24", **rgb24_options) if rgb24_options else frame
-                    for new_frame in get_new_frames(frame_callback(frame)):
+                    # pt = time.time()
+                    
+                    ret = frame_callback(frame)
+                    # ct = time.time()
+                    # d.append(ct - pt)
+                    # av_ =ct - pt#np.mean(d)
+                    # print(buffer.tell())#av_, 1/av_, type(frame), type(ret) if ret  != None else None)
+
+                    # print( ct-pt, 1/(ct-pt), type(ret) if ret  != None else None)
+                    # counter.increment()
+                    # print(f"Rate: {counter.get_rate():.2f} per second")
+                    for new_frame in get_new_frames(ret):
                         new_frame = reformatter(new_frame)
+                        
+                        # img = new_frame.to_ndarray(format='bgr24')
+                        # cv2.imshow('PyAV with OpenCV', img)
+                        # cv2.waitKey(1)
+                        
                         enc_packet = video_output_stream.encode(new_frame)
                         if enc_packet:
                             output_container.mux(enc_packet)
-                        pbar.update(1)
+                        # pbar.update(1)
+
+
         elif packet.stream.type == "audio":
+            # print("a")
             if packet.dts is not None:
                 if audio_copy:
                     packet.stream = audio_output_stream
@@ -779,10 +827,12 @@ def process_video(input_path, output_path,
                         enc_packet = audio_output_stream.encode(frame)
                         if enc_packet:
                             output_container.mux(enc_packet)
+
         if suspend_event is not None:
             suspend_event.wait()
         if stop_event is not None and stop_event.is_set():
             break
+
 
     while True:
         frame = fps_filter.update(None)
@@ -810,6 +860,49 @@ def process_video(input_path, output_path,
     pbar.close()
     output_container.close()
     input_container.close()
+    
+    
+    while 1:
+        buffer.seek(0)
+        data = buffer.getvalue()
+        le = len(data)  
+        if le:
+            # Write to disk instead of process.stdin
+            with open('output_file.dat', 'ab') as f:  # 'ab' for append binary
+                f.write(data)
+            with open('output_file.dat', 'rb') as f:  # 'ab' for append binary
+                data1 = f.read()
+            data_ = data[le-100:]
+            data1_ = data[le-100:]
+            print("\n\n",data_, "\n\n")
+            print(data1_)
+            print(len(data_), len(data1_))
+            for x in range(min(len(data_), len(data1_))):
+                if data_[x] != data1_[x]:
+                    print("-", x,  data_[x], data_[x])
+            # assert data_ == data1_
+            # Keep writing until all bytes are written
+            total_written = 0
+            while total_written < le:
+                ret = win32file.WriteFile(args.pipe, data[total_written:])
+                # ret is typically (error_code, bytes_written)
+                if isinstance(ret, tuple):
+                    bytes_written = ret[1]
+                else:
+                    # Handle case where ret might just be the bytes count
+                    bytes_written = ret
+                
+                if bytes_written == 0:
+                    # No bytes written, might indicate an error or EOF
+                    break
+                    
+                total_written += bytes_written
+                
+            args.pipe.close()
+            buffer.seek(0)
+            buffer.truncate()
+        else:
+            break
 
     if not (stop_event is not None and stop_event.is_set()):
         # success

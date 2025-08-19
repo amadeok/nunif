@@ -745,7 +745,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
     if args.compile and side_model is not None and not isinstance(side_model, DeviceSwitchInference):
         side_model = compile_model(side_model)
 
-    if is_output_dir(output_path):
+    if is_output_dir(output_path) and not "\\\\.\\pipe\\" in output_path:
         os.makedirs(output_path, exist_ok=True)
         output_filename = path.join(
             output_path,
@@ -877,7 +877,7 @@ def process_video_full(input_filename, output_path, args, depth_model, side_mode
                                  tqdm_fn=args.state["tqdm_fn"],
                                  title=path.basename(input_filename),
                                  start_time=args.start_time,
-                                 end_time=args.end_time)
+                                 end_time=args.end_time, args=args)
         finally:
             frame_callback.shutdown()
 

@@ -7,6 +7,7 @@ import time
 import socket
 import struct
 from collections import deque
+import cv2
 import wx  # for mouse pointer
 from packaging.version import Version
 import torch
@@ -25,7 +26,8 @@ from nunif.device import create_device
 from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
-
+from .decode_encode import HLSEncoder, Counter
+import numpy as np
 
 TORCH_VERSION = Version(torch.__version__)
 ENABLE_GPU_JPEG = (TORCH_VERSION.major, TORCH_VERSION.minor) >= (2, 7)
@@ -142,6 +144,10 @@ def create_parser():
     parser.add_argument("--crop-left", type=int, default=0, help="Crop pixels from left when using --window-name")
     parser.add_argument("--crop-right", type=int, default=0, help="Crop pixels from right when using --window-name")
     parser.add_argument("--crop-bottom", type=int, default=0, help="Crop pixels from bottom when using --window-name")
+    parser.add_argument("--hls", action="store_true", help="Use hls")
+    parser.add_argument("--hls_input", type=str, help="input_file")
+    
+
     parser.set_defaults(
         input="dummy",
         output="dummy",
@@ -315,6 +321,166 @@ def iw3_desktop_main(args, init_wxapp=True):
     finally:
         server.stop()
         screenshot_thread.stop()
+        depth_model.clear_compiled_model()
+        depth_model.reset()
+        gc_collect()
+
+    if args.state["stop_event"] and args.state["stop_event"].is_set():
+        args.state["stop_event"].clear()
+
+    return args
+
+
+
+import time
+
+
+def iw3_desktop_main_hls(args, init_wxapp=True):
+    init_num_threads(args.gpu[0])
+    c = Counter()
+
+
+    if args.bind_addr is None:
+        args.bind_addr = get_local_address()
+    if args.bind_addr == "0.0.0.0":
+        pass  # Allows specifying undefined addresses
+    elif args.bind_addr == "127.0.0.1" or not is_private_address(args.bind_addr):
+        raise RuntimeError(f"Detected IP address({args.bind_addr}) is not Local Area Network Address."
+                           " Specify --bind-addr option")
+
+    args.device = create_device(args.gpu)
+
+    depth_model = args.state["depth_model"]
+    print("Model: ", depth_model.model_type)
+    if not depth_model.loaded():
+        depth_model.load(gpu=args.gpu, resolution=args.resolution)
+
+    # Use Flicker Reduction to prevent 3D sickness
+    depth_model.enable_ema(args.ema_decay, buffer_size=1)
+    args.mapper = IW3U.resolve_mapper_name(mapper=args.mapper, foreground_scale=args.foreground_scale,
+                                           metric_depth=depth_model.is_metric())
+
+    # TODO: For mlbw, it is better to switch models when the divergence value dynamically changes
+    side_model = IW3U.create_stereo_model(
+        args.method,
+        divergence=args.divergence * (2.0 if args.synthetic_view in {"right", "left"} else 1.0),
+        device_id=args.gpu[0],
+    )
+
+
+    if args.screenshot != "wc_mp" and args.monitor_index != 0:
+        raise RuntimeError(f"{args.screenshot} does not support monitor_index={args.monitor_index}")
+    if args.screenshot != "wc_mp" and args.window_name:
+        raise RuntimeError(f"{args.screenshot} does not support --window-name option")
+
+    if args.window_name:
+        rect = get_window_rect_by_title(args.window_name)
+        if rect is None:
+            raise RuntimeError(f"window_name={args.window_name} not found")
+        screen_width = rect["width"] - args.crop_left - args.crop_right
+        screen_height = rect["height"] - args.crop_top - args.crop_bottom
+    else:
+        size_list = get_monitor_size_list()
+        if args.monitor_index >= len(size_list):
+            raise RuntimeError(f"monitor_index={args.monitor_index} not found")
+        screen_width, screen_height = size_list[args.monitor_index]
+
+    screen_size = (screen_width, screen_height)
+    if screen_height > args.stream_height:
+        frame_height = args.stream_height
+        frame_width = math.ceil((args.stream_height / screen_height) * screen_width)
+        frame_width -= frame_width % 2
+    else:
+        frame_height = screen_height
+        frame_width = screen_width
+
+    # with open(path.join(path.dirname(__file__), "views", "index.html.tpl"),
+    #           mode="r", encoding="utf-8") as f:
+    #     index_template = f.read()
+
+    # if init_wxapp:
+    #     empty_app = wx.App()  # noqa: this is needed to initialize wx.GetMousePosition()
+
+    # lock = threading.Lock()
+    # server = StreamingServer(
+    #     host=args.bind_addr,
+    #     port=args.port, lock=lock,
+    #     frame_width=frame_width * frame_width_scale,
+    #     frame_height=frame_height,
+    #     fps=args.stream_fps,
+    #     index_template=index_template,
+    #     stream_uri="/stream.jpg", stream_content_type="image/jpeg",
+    #     auth=auth
+    # )
+    # screenshot_thread = screenshot_factory(
+    #     fps=args.stream_fps,
+    #     frame_width=frame_width, frame_height=frame_height,
+    #     monitor_index=args.monitor_index, window_name=args.window_name,
+    #     device=device, crop_top=args.crop_top, crop_left=args.crop_left,
+    #     crop_right=args.crop_right, crop_bottom=args.crop_bottom)
+    vp = HLSEncoder(args.hls_input, "hls_output", args=args)
+    vp.start()
+    
+    try:
+        if args.compile:
+            depth_model.compile()
+            if side_model is not None and not isinstance(side_model, DeviceSwitchInference):
+                side_model = compile_model(side_model)
+        # main loop
+        # server.start()
+        # screenshot_thread.start()
+        # # if args.state["fps_event"] is not None:
+        # #     args.state["fps_event"].set_url(f"http://{args.bind_addr}:{args.port}")
+        # # else:
+        # #     print(f"Open http://{args.bind_addr}:{args.port}")
+        count = last_status_time = 0
+        fps_counter = deque(maxlen=120)
+
+        while True:
+            with args.state["args_lock"]:
+                # tick = time.perf_counter()
+                # c.pt()
+
+                # frame = screenshot_thread.get_frame()
+                frame =  vp.decode_queue.get()
+
+                sbs = IW3U.process_image(frame, args, depth_model, side_model)
+                # c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
+                vp.encode_queue.put(sbs)
+
+                
+                # if args.gpu_jpeg:
+                #     server.set_frame_data(to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
+                # else:
+                #     server.set_frame_data(lambda: to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
+
+                if count % (args.stream_fps * 30) == 0:
+                    gc_collect()
+
+                # if count > 1 and tick - last_status_time > 1:
+                #     last_status_time = tick
+                #     mean_processing_time = sum(fps_counter) / len(fps_counter)
+                #     estimated_fps = 1.0 / mean_processing_time
+                #     screen_size_tuple = (screen_size, (frame_width, frame_height))
+                    # if args.state["fps_event"] is not None:
+                    #     args.state["fps_event"].update(estimated_fps, screenshot_thread.get_fps(),
+                    #                                    server.get_fps(), screen_size_tuple)
+                    # else:
+                    #     print(f"\rEstimated FPS = {estimated_fps:.02f}, "
+                    #           f"Screenshot FPS = {screenshot_thread.get_fps():.02f}, "
+                    #           f"Streaming FPS = {server.get_fps():.02f}, "
+                    #           f"Screen Size = {screen_size_tuple}", end="")
+
+            # process_time = time.perf_counter() - tick
+            # wait_time = max((1 / (args.stream_fps)) - process_time, 0)
+            # time.sleep(wait_time)
+            # fps_counter.append(process_time)
+            count += 1
+            if args.state["stop_event"] and args.state["stop_event"].is_set():
+                break
+    finally:
+        # server.stop()
+        # screenshot_thread.stop()
         depth_model.clear_compiled_model()
         depth_model.reset()
         gc_collect()
