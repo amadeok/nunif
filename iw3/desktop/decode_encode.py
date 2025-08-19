@@ -1,4 +1,6 @@
+import gc
 import os
+import subprocess
 import time
 import threading
 import av
@@ -9,6 +11,7 @@ import cv2
 import numpy as np
 import torch 
 from concurrent.futures import  Future
+from performanceTimer import Counter
 
 
 from torchvision.transforms import (
@@ -218,54 +221,7 @@ def seek_by_percentage(container, percentage):
     print(f"target_sec {target_sec}  perc {percentage}  duration_sec {duration_sec}")
 
     # container.seek(int(target_sec))#, stream=stream)
-    container.seek(target_pts, stream=stream)
-    
-class Counter:
-    def __init__(self):
-        self.count = 0
-        self.start_time = time.time()
-        import collections
-        self.deq = collections.deque(maxlen=20)
-        self.__pt = time.time()
-        self.__ct = self.__pt
-        
-    
-    def print(self, e=""):
-        self.de = self.__ct - self.__pt
-        av = np.mean(self.deq)
-        print(f"d {self.de:4.4f} | av: {av:4.4f} | {1/av:4.4f} | {e}" )
-        
-    def ct(self, print_=""): 
-        self.__ct = time.time() 
-        self.de = self.__ct - self.__pt
-        self.deq.append(self.de)
-        if print_:self.print(print_)
-            
-    def pt(self): self.__pt = time.time() 
-    def tick(self, print_): 
-        self.__pt = self.__ct
-        self.__ct = time.time()
-        self.de = self.__ct - self.__pt
-        self.deq.append(self.de)
-        if print_:self.print(print_)
-        
-    def increment(self):
-        self.count += 1
-    
-    def get_rate(self):
-        elapsed = time.time() - self.start_time
-        return self.count / elapsed if elapsed > 0 else 0
-    
-    def reset(self):
-        self.count = 0
-        self.start_time = time.time()
-        
-        
-    def moving_average(data, window_size):
-        """Simple moving average"""
-        return np.convolve(data, np.ones(window_size)/window_size, mode='same')
-
-    
+    container.seek(target_pts, stream=stream)    
 
 class HLSEncoder:
     def __init__(self, input_f, output_dir, args, ff_hls_time=10, ff_hls_list_size=10):
@@ -275,9 +231,9 @@ class HLSEncoder:
         print("Outdir", self.output_dir)
         self.ff_hls_time = ff_hls_time
         self.ff_hls_list_size = ff_hls_list_size
-        self.encode_queue = queue.Queue(maxsize=100)
-        self.decode_queue = queue.Queue(maxsize=100)
-        self.audio_queue = queue.Queue(maxsize=10000)
+        self.encode_queue = queue.Queue(maxsize=10)
+        self.decode_queue = queue.Queue(maxsize=10)
+        self.audio_queue = queue.Queue(maxsize=100)
         self.running = False
         self.ctx = type('Context', (), {
             'is_paused': False,
@@ -320,8 +276,8 @@ class HLSEncoder:
             for stream in input_container.streams:
                 if stream.type == 'video' and self.video_stream is None:
                     self.video_stream = stream
-                elif stream.type == 'audio' and audio_stream is None:
-                    audio_stream = stream
+                # elif stream.type == 'audio' and audio_stream is None:
+                #     audio_stream = stream
             
             if self.video_stream is None:
                 raise ValueError("No video stream found in input file")
@@ -337,13 +293,18 @@ class HLSEncoder:
             
             # Decode and queue frames
             streams = [s for s in [self.video_stream, audio_stream] if s is not None]
-
+            count = 0
+            
             for packet in input_container.demux(streams):
                 if not self.running:
                     break
+                
                 while self.ctx.is_paused and not self.ctx.queue_seek:
                     time.sleep(0.1)
-                    
+                                # Add a safety check
+                if packet is None or packet.size == 0:
+                    continue
+
                 if packet.stream.type == "video":
 
 
@@ -352,6 +313,9 @@ class HLSEncoder:
                         break
                         
                     for frame_ in packet.decode():
+                        count+= 1
+                        if count % 100 == 0:
+                            gc.collect()
                         # if frame.width != width or frame.height != height:
                         #     frame = frame.reformat(width=width, height=height)
                         
@@ -389,7 +353,7 @@ class HLSEncoder:
                         
                         self.decode_queue.put(frame)#, timeout=1.0)
 
-                elif packet.stream.type == "audio":
+                elif packet.stream.type == "audio" and not self.audio_queue.full():
                     for frame in packet.decode():
                         self.audio_queue.put(frame)#, timeout=1.0)
         
@@ -403,8 +367,10 @@ class HLSEncoder:
                 self.audio_queue.put(None)
             input_container.close()
     
-    def encode_to_hls(self,  settings=(None, None, 3*1000*1000), serve_while_generating=True):
-        """Encode to HLS format with video and audio"""
+  
+
+    def encode_to_hls(self, settings=(None, None, 3*1000*1000), serve_while_generating=True):
+        """Encode to HLS format with video and audio using separate ffmpeg process"""
         self.video_stream_ready.result()
         print("Encode started")
         os.makedirs(self.output_dir, exist_ok=True)
@@ -417,7 +383,7 @@ class HLSEncoder:
         input_container = av.open(self.input_file)
         has_audio = any(stream.type == 'audio' for stream in input_container.streams)
         input_container.close()
-    
+
         if self.args.full_sbs:
             frame_width_scale = 2
         elif self.args.rgbd:
@@ -428,158 +394,175 @@ class HLSEncoder:
             self.args.half_sbs = True
             frame_width_scale = 1
                 
-        
         width, height, bitrate = settings
         width = self.video_stream.width * frame_width_scale
         height = self.video_stream.height
         
-        # Configure output
+        # Build ffmpeg command
+        output_path = os.path.join(self.output_dir, 'master.m3u8')
+        segment_pattern = os.path.join(self.output_dir, 'segment_%03d.ts')
         
-        output_path =  os.path.join( self.output_dir, 'master.m3u8')
-        # with open(output_path, "w") as f:pass
-        output_container = av.open(
-            output_path,
-            mode='w',
-            format='hls',
-            options={
-                'hls_segment_type': 'mpegts',
-                'hls_time': str(self.ff_hls_time),
-                'hls_list_size': str(self.ff_hls_list_size),
-                'hls_flags': 'independent_segments+append_list',
-                "hls_part_duration_us": "200000",
-                "hls_playlist_type": "event",
-                'hls_segment_filename': os.path.join(self.output_dir, 'segment_%03d.ts'),
-                'video_size': f'{width}x{height}',
-            }
-        )
-        use_gpu_encoding = True
-        if not use_gpu_encoding:
-            video_stream = output_container.add_stream(
-                'libx264',
-                options={
-                    'preset': 'ultrafast',
-                    'crf': '20',
-                    'movflags': '+faststart',
-                    "tune": "zerolatency",
-                    # "r": str(self.framerate)
-                },
-                rate=self.framerate
-            )
-        else:   
-            video_stream = output_container.add_stream(
-                'h264_nvenc',# 'libx264',
-                options={
-                    "preset": "p1",
-                    "cq": "23", 
-                    # 'crf': '20',
-                    # 'movflags': '+faststart',
-                },
-                rate=self.framerate
-            )
-                
-        video_stream.width = width
-        video_stream.height = height
-        video_stream.pix_fmt = 'yuv420p'
+        ffmpeg_cmd = [
+            'ffmpeg',
+            '-y',  # Overwrite output files
+            '-f', 'rawvideo',
+            '-pix_fmt', 'bgr24',  # Match your frame format
+            '-s', f'{width}x{height}',
+            '-r', str(self.framerate),
+            '-i', '-',  # Read from stdin
+        ]
         
-        # Add audio stream if available
-        audio_stream = None
+        # Add audio input if available
         if has_audio:
-            audio_stream = output_container.add_stream('aac')
+            ffmpeg_cmd.extend([
+                '-i', self.input_file,  # Use original file for audio
+                '-map', '0:v',  # Video from first input (stdin)
+                '-map', '1:a',  # Audio from second input
+            ])
+        else:
+            ffmpeg_cmd.extend(['-an'])  # No audio
         
-        # # Start decoding thread
-        # self.running = True
-        # decode_thread = threading.Thread(
-        #     target=self.decode_video
-        # )
-        # decode_thread.daemon = True
-        # decode_thread.start()
+        # Add encoding options
+        use_gpu_encoding = True
+        if use_gpu_encoding:
+            video_codec = 'h264_nvenc'
+            video_options = [
+                '-c:v', video_codec,
+                '-preset', 'p1',
+                '-cq', '23',
+                '-rc', 'constqp',
+            ]
+        else:
+            video_codec = 'libx264'
+            video_options = [
+                '-c:v', video_codec,
+                '-preset', 'ultrafast',
+                '-crf', '20',
+                '-tune', 'zerolatency',
+            ]
         
-        # Encoding loop
-        c = self.c
+        ffmpeg_cmd.extend(video_options)
+        
+        # Add audio codec if available
+        if has_audio:
+            ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
+        
+        # Add HLS output options
+        ffmpeg_cmd.extend([
+            '-f', 'hls',
+            '-hls_time', str(self.ff_hls_time),
+            '-hls_list_size', str(self.ff_hls_list_size),
+            '-hls_flags', 'independent_segments+append_list',
+            '-hls_segment_type', 'mpegts',
+            '-hls_segment_filename', segment_pattern,
+            '-hls_playlist_type', 'event',
+            output_path
+        ])
+        
+        print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
+        
+        # Start ffmpeg process
         try:
-            video_finished = False
-            audio_finished = not has_audio
+            ffmpeg_process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=10**8  # Large buffer for video frames
+            )
             
-            while self.running and (not video_finished or not audio_finished):
-                # Process video frames
-                if not video_finished and self.encode_queue.qsize():
-                    # try:
+            # Function to handle ffmpeg output
+            def monitor_ffmpeg():
+                while self.running and ffmpeg_process.poll() is None:
+                    try:
+                        line = ffmpeg_process.stderr.readline().decode('utf-8')
+                        if line:
+                            print(f"ffmpeg: {line.strip()}")
+                    except:
+                        break
+            
+            # Start monitoring thread
+            monitor_thread = threading.Thread(target=monitor_ffmpeg)
+            monitor_thread.daemon = True
+            monitor_thread.start()
+            
+            # Encoding loop
+            c = self.c
+            video_finished = False
+            
+            while self.running and not video_finished:
+                if self.encode_queue.qsize():
+                    try:
                         # c.pt()
-                        sbs  = self.encode_queue.get()
-                        # sbs = sbs.to(torch.uint8)
-                        sbs = (sbs * 255).to(torch.uint8)
 
+                        sbs = self.encode_queue.get()
+                        sbs = (sbs * 255).to(torch.uint8)
+                        
                         img_np = sbs.detach().cpu().numpy()
-                
+                        
                         # Permute dimensions from [C, H, W] to [H, W, C]
                         img_np = np.transpose(img_np, (1, 2, 0))
-
-                        # If tensor is in float format (0-1), convert to uint8 (0-255)
+                        
+                        # Convert to uint8 if needed
                         if img_np.dtype == np.float32 or img_np.dtype == np.float64:
                             img_np_bgr = (img_np * 255).astype(np.uint8)
                         else:
                             img_np_bgr = img_np
-                        # c.pt()
-
-                        # img_np_rgb = cv2.cvtColor(img_np_bgr, cv2.COLOR_RGB2BGR)
-
-                        # cv2.imshow('PyAV with OpenCV', img_np_bgr)
-                        # cv2.waitKey(1)
-                            # Ensure array is contiguous and in correct format
-                        rgb_array = np.ascontiguousarray(img_np_bgr)
-                    
-                        frame = av.VideoFrame.from_ndarray(rgb_array, format="bgr24")
-
-                        if frame is None:
-                            video_finished = True
-                        else:
-                            for packet in video_stream.encode(frame):
-                                output_container.mux(packet)
+                        
+                        img_np_bgr = np.ascontiguousarray(img_np_bgr)
                         # c.ct(1)
 
-                    # except queue.Empty:
-                    #     pass
-                
-                # Process audio frames
-                if has_audio and not audio_finished and self.audio_queue.qsize():
-                    frame = self.audio_queue.get()
-                    if frame is None:
-                        audio_finished = True
-                    else:
-                        for packet in audio_stream.encode(frame):
-                            output_container.mux(packet)
-
+                        # Write frame to ffmpeg stdin
+                        try:
+                            ffmpeg_process.stdin.write(img_np_bgr)
+                        except BrokenPipeError:
+                            print("ffmpeg process terminated unexpectedly")
+                            break
+                        
+                        
+                    except queue.Empty:
+                        pass
+                    except Exception as e:
+                        print(f"Error processing frame: {e}")
+                        break
+            
                 time.sleep(0.001)
+                
                 # Handle seek requests
                 if self.ctx.queue_seek:
                     print("Seeking requested, restarting encoding")
                     break
             
-            # Flush encoders
-            for packet in video_stream.encode(None):
-                output_container.mux(packet)
-                
-            if has_audio:
-                for packet in audio_stream.encode(None):
-                    output_container.mux(packet)
-            
-            print("HLS encoding complete.")
+            # Close stdin to signal end of input
+            if ffmpeg_process.stdin:
+                ffmpeg_process.stdin.close()
+        
+            # Wait for ffmpeg to finish
+            try:
+                ffmpeg_process.wait(timeout=30)
+                print("HLS encoding complete.")
+            except subprocess.TimeoutExpired:
+                print("ffmpeg process timed out, terminating...")
+                ffmpeg_process.terminate()
+                ffmpeg_process.wait()
             
         except Exception as e:
             print(f"Encoding error: {e}")
+            # Clean up ffmpeg process if it exists
+            if 'ffmpeg_process' in locals() and ffmpeg_process.poll() is None:
+                ffmpeg_process.terminate()
         finally:
             self.running = False
-            output_container.close()
             
             if serve_while_generating:
                 # Keep server running for a bit after encoding finishes
                 time.sleep(1)
                 httpd.shutdown()
-
+            
 def start_http_server(output_dir):
     """Start a simple HTTP server to serve HLS files"""
     os.chdir(output_dir)
-    server_address = ('', 8000)
+    server_address = ('0.0.0.0', 8123)
     httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
     server_thread = threading.Thread(target=httpd.serve_forever)
     server_thread.daemon = True

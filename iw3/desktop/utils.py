@@ -26,8 +26,9 @@ from nunif.device import create_device
 from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
-from .decode_encode import HLSEncoder, Counter
+from .decode_encode import HLSEncoder
 import numpy as np
+from performanceTimer import Counter
 
 TORCH_VERSION = Version(torch.__version__)
 ENABLE_GPU_JPEG = (TORCH_VERSION.major, TORCH_VERSION.minor) >= (2, 7)
@@ -443,6 +444,9 @@ def iw3_desktop_main_hls(args, init_wxapp=True):
 
                 # frame = screenshot_thread.get_frame()
                 frame =  vp.decode_queue.get()
+                if type(frame) != torch.Tensor and not frame:
+                    print("Decode terminated")
+                    break
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
                 c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
