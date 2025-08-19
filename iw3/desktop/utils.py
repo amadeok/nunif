@@ -445,7 +445,7 @@ def iw3_desktop_main_hls(args, init_wxapp=True):
                 frame =  vp.decode_queue.get()
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
-                # c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
+                c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
                 vp.encode_queue.put(sbs)
 
                 

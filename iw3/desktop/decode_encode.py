@@ -504,9 +504,10 @@ class HLSEncoder:
                 # Process video frames
                 if not video_finished and self.encode_queue.qsize():
                     # try:
-                        c.pt()
+                        # c.pt()
                         sbs  = self.encode_queue.get()
-                        sbs = sbs.to(torch.uint8)
+                        # sbs = sbs.to(torch.uint8)
+                        sbs = (sbs * 255).to(torch.uint8)
 
                         img_np = sbs.detach().cpu().numpy()
                 
@@ -534,7 +535,7 @@ class HLSEncoder:
                         else:
                             for packet in video_stream.encode(frame):
                                 output_container.mux(packet)
-                        c.ct(1)
+                        # c.ct(1)
 
                     # except queue.Empty:
                     #     pass
