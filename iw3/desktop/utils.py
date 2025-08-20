@@ -447,7 +447,7 @@ def iw3_desktop_main_hls(args, init_wxapp=True):
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
                 vp.encode_queue.put(sbs)
-                c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
+                c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()} |{vp.get_last_peek_sizes()}")
 
                 if count % (args.stream_fps * 30) == 0:
                     gc_collect()
