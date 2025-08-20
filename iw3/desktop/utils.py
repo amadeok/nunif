@@ -434,51 +434,24 @@ def iw3_desktop_main_hls(args, init_wxapp=True):
         # #     args.state["fps_event"].set_url(f"http://{args.bind_addr}:{args.port}")
         # # else:
         # #     print(f"Open http://{args.bind_addr}:{args.port}")
-        count = last_status_time = 0
-        fps_counter = deque(maxlen=120)
+        count = 0
 
         while True:
             with args.state["args_lock"]:
-                # tick = time.perf_counter()
                 # c.pt()
 
-                # frame = screenshot_thread.get_frame()
                 frame =  vp.decode_queue.get()
                 if type(frame) != torch.Tensor and not frame:
                     print("Decode terminated")
                     break
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
-                c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
                 vp.encode_queue.put(sbs)
-
-                
-                # if args.gpu_jpeg:
-                #     server.set_frame_data(to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
-                # else:
-                #     server.set_frame_data(lambda: to_jpeg_data(sbs, quality=args.stream_quality, tick=tick, gpu_jpeg=args.gpu_jpeg))
+                c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()}")
 
                 if count % (args.stream_fps * 30) == 0:
                     gc_collect()
-
-                # if count > 1 and tick - last_status_time > 1:
-                #     last_status_time = tick
-                #     mean_processing_time = sum(fps_counter) / len(fps_counter)
-                #     estimated_fps = 1.0 / mean_processing_time
-                #     screen_size_tuple = (screen_size, (frame_width, frame_height))
-                    # if args.state["fps_event"] is not None:
-                    #     args.state["fps_event"].update(estimated_fps, screenshot_thread.get_fps(),
-                    #                                    server.get_fps(), screen_size_tuple)
-                    # else:
-                    #     print(f"\rEstimated FPS = {estimated_fps:.02f}, "
-                    #           f"Screenshot FPS = {screenshot_thread.get_fps():.02f}, "
-                    #           f"Streaming FPS = {server.get_fps():.02f}, "
-                    #           f"Screen Size = {screen_size_tuple}", end="")
-
-            # process_time = time.perf_counter() - tick
-            # wait_time = max((1 / (args.stream_fps)) - process_time, 0)
-            # time.sleep(wait_time)
-            # fps_counter.append(process_time)
+                    
             count += 1
             if args.state["stop_event"] and args.state["stop_event"].is_set():
                 break

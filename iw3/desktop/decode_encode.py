@@ -1,4 +1,5 @@
 import gc
+import json
 import os
 import subprocess
 import time
@@ -6,26 +7,21 @@ import threading
 import av
 import queue
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from typing import Tuple
+from typing import Literal, Tuple
 import cv2
 import numpy as np
 import torch 
 from concurrent.futures import  Future
 from performanceTimer import Counter
-
+import pygetwindow as gw, math
 
 from torchvision.transforms import (
     functional as TF,
     InterpolationMode)
 
-
 import re
 from pynput import mouse
 import win32gui
-import win32api
-import pygetwindow as gw
-import os
-import time
 
 
 
@@ -50,85 +46,60 @@ def remove_last_segments(playlist_path, segments_to_remove=5):
     
     print(f"Removed the last {segments_to_remove} segments from the playlist")
 
-class Context:
-    def __init__(self):
         
-        
-        
-        self.output_dir = os.path.abspath("hls_output")
-        self.init_dir()
-        
-        self.ff_hls_time = 2
-        self.ff_hls_list_size = 2
-        
-        self.queue_seek = None
-        self.seg_delta = None
-        self.is_paused = False
-        self.seg_delta_pause_thres = 2
-        
-        # self.start_frames = 24*15
-                # Then where you originally had the code, replace it with:
-        thread = threading.Thread( target=self.check_segment_delta)
-        thread.daemon = True  # Makes the thread exit when main program exits
-        thread.start()
-        
-        self.last_req_seg_n = 0
-        self.newest_seg_n = 0
-        
-        import pygetwindow as gw, math
-        def my_click_callback(x, y):
-            perc = (x / notepad_hwnd.width)*100
-            self.queue_seek =  perc
-        
-        self.handler = WindowClickHandler()
-        
-        
-        notepad_hwnd :gw.Window = find_window_by_title("Notepad++")
-        if not notepad_hwnd:
-            print("Notepad++ window not found!")
-            exit()
-        
-        self.handler.set_click_callback(notepad_hwnd, my_click_callback)
-        
-    def deinit(self):
-        self.handler.remove_click_callback()
-        print("Listener stopped.")
-            
+import win32file
 
-    def init_dir(self):
-        import shutil
-    
-        # Clean up previous output if it exists
-        if os.path.exists(self.output_dir):
-            try:
-                shutil.rmtree(self.output_dir)
-            except Exception as e:
-                print("Error cleaning up:", e)
-        while os.path.isdir(self.output_dir):#or len(os.listdir(self.output_dir)):
-            print("Wait for delete")
-            time.sleep(0.01)
-        os.makedirs(self.output_dir, exist_ok=True)
+def pause_unpause(op: Literal['toggle', 'pause', 'unpause'], pipe_path=None):
+    if op== "toggle":
+        command = {  "command": ["cycle", "pause" ]  } 
+    elif op == "pause":
+        command = {  "command": ["set_property", "pause", True]  } 
+    elif op== "unpause":
+        command = {  "command": ["set_property", "pause", False]  } 
+    else:assert(0)
+    res = send_cmd(proc_cmd(command), pipe_path)
+    # print(res)
+    return res
 
+def create_pipe_read_write(pipe_path=None):
+    return create_pipe(pipe_path, win32file.GENERIC_WRITE | win32file.GENERIC_READ)
 
-    def seek(self):
-        print("seek")
-        self.queue_seek = 4
-        
-    def check_segment_delta(self):
-        while 1:
-            self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
+def create_pipe(pipe_path=None, flags=win32file.GENERIC_WRITE):
+    global mpv_ipc_current_pipe_index
+    try:
+        handle = win32file.CreateFile(pipe_path,flags,0,None,win32file.OPEN_EXISTING,0,None)
+    except Exception as e:
+        print(f"error creating first pipe({pipe_path})", e)
 
-            if self.newest_seg_n is not None and self.last_req_seg_n is not None:
-                self.seg_delta = self.newest_seg_n - self.last_req_seg_n
-                
-                if self.seg_delta >= self.seg_delta_pause_thres:
-                    print("--------Pausing", self.seg_delta)
-                    self.is_paused = True
-                else:
-                    print("--------Resuming", self.seg_delta)
-                    self.is_paused = False
-            time.sleep(1)
+    return handle
 
+def proc_cmd(cmd): return json.dumps(cmd) + '\n'
+
+def seek_absolute_perc(perc, pipe_path=None):
+    command = { "command": ["seek", perc, "absolute-percent", "exact"] }
+    res = send_cmd(proc_cmd(command), pipe_path)
+    if res:
+        print(res)
+    # print_playback_time(pipe_path)
+    return res
+
+def send_cmd(cmd, pipe_path=None, read_response=False):
+    handle = create_pipe_read_write(pipe_path)
+    response = None
+    if handle:
+        win32file.WriteFile(handle, cmd.encode())
+        if read_response:
+            result, data_recv = win32file.ReadFile(handle, 4096) 
+            lines = data_recv.splitlines()
+            if len(lines) > 1:
+                data_ = lines[0]
+            else: data_ = data_recv
+            response = json.loads(data_.decode())
+        else:
+            response = None
+        win32file.CloseHandle(handle)
+    else: return None
+    return response
 
 
 
@@ -160,7 +131,6 @@ class WindowClickHandler:
                 if self.click_callback:
                     self.click_callback(client_pt[0], client_pt[1])
                 # print(f"Clicked at client coordinates: {client_pt}")
-
 
 def find_window_by_title(title_substring):
     """Find a window by title substring"""
@@ -206,42 +176,26 @@ def extract_n(file):
             print("No number found in filename", file)
         
 def get_most_recent_seg_n(folder_path):
-
     file = get_most_recent_seg(folder_path)
     if file:
         return extract_n(file)
 
-def seek_by_percentage(container, percentage):
-    
-    stream = container.streams.video[0]  # or audio[0] for audio
-    
-    duration_sec = float(stream.duration * stream.time_base)
-    target_sec = duration_sec * (percentage / 100.0)
-    target_pts = int(target_sec / stream.time_base)
-    print(f"target_sec {target_sec}  perc {percentage}  duration_sec {duration_sec}")
-
-    # container.seek(int(target_sec))#, stream=stream)
-    container.seek(target_pts, stream=stream)    
-
 class HLSEncoder:
-    def __init__(self, input_f, output_dir, args, ff_hls_time=10, ff_hls_list_size=10):
+    def __init__(self, input_f, output_dir, args, ff_hls_time=4, ff_hls_list_size=0):
         self.input_file = input_f
-        self.output_dir =os.path.join(os.path.expandvars("%APPDATA%"), output_dir)# os.path.abspath(output_dir)
-        os.makedirs(self.output_dir, exist_ok=1)
+
+        # self.output_dir =os.path.join(os.path.expandvars("%APPDATA%"), output_dir)# os.path.abspath(output_dir)
+        self.output_dir =  os.path.abspath(output_dir)
+        self.init_dir()
         print("Outdir", self.output_dir)
+        self.video_info = [0, 0, 0]
         self.ff_hls_time = ff_hls_time
         self.ff_hls_list_size = ff_hls_list_size
         self.encode_queue = queue.Queue(maxsize=10)
         self.decode_queue = queue.Queue(maxsize=10)
         self.audio_queue = queue.Queue(maxsize=100)
         self.running = False
-        self.ctx = type('Context', (), {
-            'is_paused': False,
-            'queue_seek': None,
-            'start_frames': 0,
-            'seg_delta': None,
-            'last_req_seg_n': 0
-        })()
+
         self.args = args
         self.video_stream = None
         if args.device.type == "cuda":
@@ -250,7 +204,71 @@ class HLSEncoder:
             self.cuda_stream = None
         self.video_stream_ready = Future()
         self.c = Counter()
+        self.mpv_ipc_control_pipe = r"\\.\pipe\mpv_iw3_hls_pipe"
+        ##
+        self.seg_delta = None
+        self.is_paused = False
+        self.seg_delta_pause_thres = 2
+
+        thread = threading.Thread( target=self.check_segment_delta)
+        thread.daemon = True  # Makes the thread exit when main program exits
+        thread.start()
         
+        self.last_req_seg_n = 0
+        self.newest_seg_n = 0
+        
+        def my_click_callback(x, y):
+            perc = (x / notepad_hwnd.width)*100
+            # self.queue_seek =  perc
+            seek_absolute_perc(perc, self.mpv_ipc_control_pipe)
+        
+        self.handler = WindowClickHandler()
+        
+        notepad_hwnd :gw.Window = find_window_by_title("Notepad++")
+        if not notepad_hwnd:
+            print("Notepad++ window not found!")
+            exit()
+        
+        self.handler.set_click_callback(notepad_hwnd, my_click_callback)
+        
+    def seek(self):
+        print("seek")
+        self.queue_seek = 4
+        
+    def check_segment_delta(self):
+        while 1:
+            self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
+
+            if self.newest_seg_n is not None and self.last_req_seg_n is not None:
+                self.seg_delta = self.newest_seg_n - self.last_req_seg_n
+                
+                if self.seg_delta >= self.seg_delta_pause_thres:
+                    print("- Pausing", self.seg_delta, " -")
+                    self.is_paused = True
+                    pause_unpause('pause', self.mpv_ipc_control_pipe)
+                else:
+                    print("- Resuming", self.seg_delta, " -")
+                    self.is_paused = False
+                    pause_unpause('unpause', self.mpv_ipc_control_pipe)
+            time.sleep(1)
+            
+    def deinit(self):
+        self.handler.remove_click_callback()
+        print("Listener stopped.")
+
+    def init_dir(self):
+        import shutil
+
+        if os.path.exists(self.output_dir):
+            try:
+                shutil.rmtree(self.output_dir)
+            except Exception as e:
+                print("Error cleaning up:", e)
+        while os.path.isdir(self.output_dir):#or len(os.listdir(self.output_dir)):
+            print("Wait for delete")
+            time.sleep(0.01)
+        os.makedirs(self.output_dir, exist_ok=True)
+
     def start(self):
         """Start the decode and encode threads"""
         if self.running:
@@ -265,119 +283,90 @@ class HLSEncoder:
         self.decode_thread.start()
         self.encode_thread.start()
 
-    def decode_vido(self):#,  settings):
-        """Decode video frames in a separate thread"""
+    def decode_vido(self):
+        binary =  os.path.expanduser("~") +  r"\rifef _\mpv-x86_64\mpv_.com"
+
+        cap = cv2.VideoCapture(self.input_file)
+        self.video_info = int(cap.get(3)), int(cap.get(4)), cap.get(5)
+        w, h, fps = self.video_info
+        cap.release()
+        
+        self.video_stream_ready.set_result([w, h, fps])
+
+        # ./mpv_.com --vf=format=fmt=help
+        mpv_command = [
+            binary,
+            self.input_file,
+            "--ovc=rawvideo",  
+            "--vf=format=fmt=rgb24",
+            "--of=rawvideo",     # Set output format to raw video
+            "-o", "-",
+            f"--input-ipc-server={self.mpv_ipc_control_pipe}",
+            # "--msg-level=all=warn"
+        ]
+        c = self.c
         try:
-            input_container = av.open(self.input_file)
-            self.video_stream = None
-            audio_stream = None
-            
-            # Find video and audio streams
-            for stream in input_container.streams:
-                if stream.type == 'video' and self.video_stream is None:
-                    self.video_stream = stream
-                # elif stream.type == 'audio' and audio_stream is None:
-                #     audio_stream = stream
-            
-            if self.video_stream is None:
-                raise ValueError("No video stream found in input file")
-            
-            self.framerate = self.video_stream.base_rate  # or video_stream.base_rate
-            self.video_stream_ready.set_result(True)
-            
-            
-            # Seek if requested
-            if self.ctx.queue_seek:                           
-                seek_by_percentage(input_container, self.ctx.queue_seek)
-                self.ctx.queue_seek = None
-            
-            # Decode and queue frames
-            streams = [s for s in [self.video_stream, audio_stream] if s is not None]
-            count = 0
-            
-            for packet in input_container.demux(streams):
-                if not self.running:
-                    break
-                
-                while self.ctx.is_paused and not self.ctx.queue_seek:
-                    time.sleep(0.1)
-                                # Add a safety check
-                if packet is None or packet.size == 0:
-                    continue
+            process = subprocess.Popen(
+                mpv_command,
+                stdout=subprocess.PIPE,
+                # stderr=subprocess.PIPE,
+                # bufsize=0  # Unbuffered
+            )
+            print("MPV process spawned successfully.")
 
-                if packet.stream.type == "video":
+            frame_size_bytes = w * h * 3  # 3 bytes per pixel for RGB24
+                        
+            while True:
 
+                # c.pt()
 
-                    
-                    if self.ctx.queue_seek:
+                data = b''
+                while len(data) < frame_size_bytes:
+                    chunk = process.stdout.read(frame_size_bytes - len(data))
+                    if not chunk:
                         break
-                        
-                    for frame_ in packet.decode():
-                        count+= 1
-                        if count % 100 == 0:
-                            gc.collect()
-                        # if frame.width != width or frame.height != height:
-                        #     frame = frame.reformat(width=width, height=height)
-                        
-                        framergb = frame_.to_ndarray(format='rgb24')
+                    data += chunk
+                assert len(data) == frame_size_bytes
+                # c.ct(1)
+                framergb = np.frombuffer(data, dtype=np.uint8).reshape((h, w, 3))
+                frame_buffer = torch.from_numpy(framergb)
 
-                        # frame = np.ndarray((self.screen_height, self.screen_width, 3),
-                        #                 dtype=np.uint8, buffer=self.process_frame_buffer.buf)
-                        # deepcopy
-                        frame_buffer = torch.from_numpy(framergb)
-                        # if frame_buffer is None:
-                        #     frame_buffer = frame.clone()
-                        #     if torch.cuda.is_available():
-                        #         frame_buffer = frame_buffer.pin_memory()
-                        # else:
-                        #     frame_buffer.copy_(frame)
+                if self.cuda_stream is not None:
+                    with torch.cuda.stream(self.cuda_stream):
+                        frame = frame_buffer.to(self.args.device)
+                        frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
+                        self.cuda_stream.synchronize()
+                else:
+                    frame = frame_buffer.to(self.args.device)
+                    frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
+                    
+                self.decode_queue.put(frame)#, timeout=1.0)
 
-                        if self.cuda_stream is not None:
-                            with torch.cuda.stream(self.cuda_stream):
-                                frame = frame_buffer.to(self.args.device)
-                                frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
-        
-                                # if frame.shape[1:] != (self.frame_height, self.frame_width):
-                                #     frame = TF.resize(frame, size=(self.frame_height, self.frame_width),
-                                #                     interpolation=InterpolationMode.BILINEAR,
-                                #                     antialias=True)
-                                self.cuda_stream.synchronize()
-                        else:
-                            frame = frame_buffer.to(self.args.device)
-                            frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
+                # cv2.imshow("test",framergb)
+                # cv2.waitKey(1)
 
-                            # if frame.shape[1:] != (self.frame_height, self.frame_width):
-                            #     frame = TF.resize(frame, size=(self.frame_height, self.frame_width),
-                            #                     interpolation=InterpolationMode.BILINEAR,
-                            #                     antialias=True)
-                        
-                        self.decode_queue.put(frame)#, timeout=1.0)
-
-                elif packet.stream.type == "audio" and not self.audio_queue.full():
-                    for frame in packet.decode():
-                        self.audio_queue.put(frame)#, timeout=1.0)
-        
-            
+                
+        except FileNotFoundError:
+            print("Error: MPV not found. Please ensure it's installed and in your system's PATH.")
         except Exception as e:
-            print(f"Decoding error: {e}")
+            print(f"An error occurred: {e}")
         finally:
-            # Signal end of streams
             self.decode_queue.put(None)
-            if audio_stream:
-                self.audio_queue.put(None)
-            input_container.close()
+            if 'process' in locals() and process.poll() is None:
+                process.terminate()
+            print("MPV process terminated.")
     
   
 
-    def encode_to_hls(self, settings=(None, None, 3*1000*1000), serve_while_generating=True):
+    def encode_to_hls(self, bitrate= 3*1000*1000, serve_while_generating=True):
         """Encode to HLS format with video and audio using separate ffmpeg process"""
-        self.video_stream_ready.result()
-        print("Encode started")
+        width, height, framerate =  self.video_stream_ready.result()
+        print("Encode started", width, height, framerate)
         os.makedirs(self.output_dir, exist_ok=True)
         
         # Start HTTP server in a separate thread if requested
         if serve_while_generating:
-            httpd = start_http_server(self.output_dir)
+            httpd = start_http_server(self.output_dir, self)
         
         # Check if input has audio
         input_container = av.open(self.input_file)
@@ -394,9 +383,7 @@ class HLSEncoder:
             self.args.half_sbs = True
             frame_width_scale = 1
                 
-        width, height, bitrate = settings
-        width = self.video_stream.width * frame_width_scale
-        height = self.video_stream.height
+        width = width * frame_width_scale
         
         # Build ffmpeg command
         output_path = os.path.join(self.output_dir, 'master.m3u8')
@@ -408,11 +395,10 @@ class HLSEncoder:
             '-f', 'rawvideo',
             '-pix_fmt', 'bgr24',  # Match your frame format
             '-s', f'{width}x{height}',
-            '-r', str(self.framerate),
+            '-r', str(framerate),
             '-i', '-',  # Read from stdin
         ]
         
-        # Add audio input if available
         if has_audio:
             ffmpeg_cmd.extend([
                 '-i', self.input_file,  # Use original file for audio
@@ -422,15 +408,27 @@ class HLSEncoder:
         else:
             ffmpeg_cmd.extend(['-an'])  # No audio
         
-        # Add encoding options
-        use_gpu_encoding = True
-        if use_gpu_encoding:
+
+        ffmpeg_cmd.extend([
+            '-f', 'hls',
+            '-hls_time', str(self.ff_hls_time),
+            '-hls_list_size', str(self.ff_hls_list_size),
+            '-hls_flags', 'independent_segments+append_list',
+            '-hls_segment_type', 'mpegts',
+            '-hls_segment_filename', segment_pattern,
+            '-hls_playlist_type', 'event',
+            # output_path
+        ])
+        
+        
+        if self.args.gpu_encoding:
             video_codec = 'h264_nvenc'
             video_options = [
                 '-c:v', video_codec,
                 '-preset', 'p1',
                 '-cq', '23',
                 '-rc', 'constqp',
+                "-g", "144",
             ]
         else:
             video_codec = 'libx264'
@@ -440,6 +438,8 @@ class HLSEncoder:
                 '-crf', '20',
                 '-tune', 'zerolatency',
             ]
+                # Add HLS output options
+
         
         ffmpeg_cmd.extend(video_options)
         
@@ -447,18 +447,8 @@ class HLSEncoder:
         if has_audio:
             ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', '128k'])
         
-        # Add HLS output options
-        ffmpeg_cmd.extend([
-            '-f', 'hls',
-            '-hls_time', str(self.ff_hls_time),
-            '-hls_list_size', str(self.ff_hls_list_size),
-            '-hls_flags', 'independent_segments+append_list',
-            '-hls_segment_type', 'mpegts',
-            '-hls_segment_filename', segment_pattern,
-            '-hls_playlist_type', 'event',
-            output_path
-        ])
-        
+        ffmpeg_cmd.append(output_path)
+
         print(f"Running ffmpeg command: {' '.join(ffmpeg_cmd)}")
         
         # Start ffmpeg process
@@ -527,17 +517,11 @@ class HLSEncoder:
                         break
             
                 time.sleep(0.001)
-                
-                # Handle seek requests
-                if self.ctx.queue_seek:
-                    print("Seeking requested, restarting encoding")
-                    break
+
             
-            # Close stdin to signal end of input
             if ffmpeg_process.stdin:
                 ffmpeg_process.stdin.close()
         
-            # Wait for ffmpeg to finish
             try:
                 ffmpeg_process.wait(timeout=30)
                 print("HLS encoding complete.")
@@ -559,17 +543,39 @@ class HLSEncoder:
                 time.sleep(1)
                 httpd.shutdown()
             
-def start_http_server(output_dir):
-    """Start a simple HTTP server to serve HLS files"""
-    os.chdir(output_dir)
-    server_address = ('0.0.0.0', 8123)
-    httpd = HTTPServer(server_address, SimpleHTTPRequestHandler)
-    server_thread = threading.Thread(target=httpd.serve_forever)
-    server_thread.daemon = True
-    server_thread.start()
-    print(f"Serving HLS files from {output_dir} on http://localhost:8000")
-    return httpd
+class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
+    # def __init__(self, request, client_address, server, *, directory = None):
+    #     super().__init__(request, client_address, server, directory=directory, vp=None)
+        
+    def do_GET(self):
+        print(f"Requested file: {self.path}")  # Log the requested path
+        if self.path.endswith(".ts") and hasattr(self, "vp"):
+            self.vp.last_req_seg_n = extract_n( self.path) or 0
+            
+        super().do_GET()
 
+def start_http_server(output_dir, vp):
+    # Change to the output directory so the server serves from there
+    os.chdir(output_dir)
+    
+    # Start HTTP server in a separate thread
+    server_address = ('0.0.0.0', vp.args.port)
+    
+    handler = LoggingHTTPRequestHandler
+    handler.vp = vp  
+
+    httpd = HTTPServer(server_address, handler)  # Use our custom handler
+    
+    
+    def run_server():
+        print(f"Serving HLS stream at http://localhost:{vp.args.port}/playlist.m3u8")
+        httpd.serve_forever()
+    
+    thread = threading.Thread(target=run_server)
+    thread.daemon = True
+    thread.start()
+    return httpd
+    
 
 
 if __name__ == "__main__":
