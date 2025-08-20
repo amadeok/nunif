@@ -71,10 +71,10 @@ def create_pipe(pipe_path=None, flags=win32file.GENERIC_WRITE):
     global mpv_ipc_current_pipe_index
     try:
         handle = win32file.CreateFile(pipe_path,flags,0,None,win32file.OPEN_EXISTING,0,None)
+        return handle
     except Exception as e:
         print(f"error creating first pipe({pipe_path})", e)
 
-    return handle
 
 def proc_cmd(cmd): return json.dumps(cmd) + '\n'
 
@@ -294,7 +294,7 @@ class HLSEncoder:
             print("Notepad++ window not found!")
             exit()
         
-        # self.handler.set_click_callback(notepad_hwnd, my_click_callback)
+        self.handler.set_click_callback(notepad_hwnd, my_click_callback)
         
         
         self.video_pipe_name = r'\\.\pipe\ffmpeg_video_pipe__'
@@ -332,17 +332,17 @@ class HLSEncoder:
         while 1:
             self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
 
-            if self.newest_seg_n is not None and self.last_req_seg_n is not None:
+            if 0 and self.newest_seg_n is not None and self.last_req_seg_n is not None:
                 self.seg_delta = self.newest_seg_n - self.last_req_seg_n
                 
                 if self.seg_delta >= self.seg_delta_pause_thres:
                     print("- Pausing", self.seg_delta, " -")
                     self.is_paused = True
-                    pause_unpause('pause', self.mpv_ipc_control_pipe)
+                    # pause_unpause('pause', self.mpv_ipc_control_pipe)
                 else:
                     print("- Resuming", self.seg_delta, " -")
                     self.is_paused = False
-                    pause_unpause('unpause', self.mpv_ipc_control_pipe)
+                    # pause_unpause('unpause', self.mpv_ipc_control_pipe)
             time.sleep(1)
     
     def get_last_peek_sizes(self):
@@ -431,24 +431,25 @@ class HLSEncoder:
                 "--ovc=rawvideo",  
                 "--oac=pcm_s16le", 
                 # f"--vf=format=fmt={self.pixel_format}",#,fps={self.fps}",
-                f"--vf=format=fmt=rgb24",#,fps={self.fps}",
-                "--of=avi",     # Set output format to raw video
-                "-o", "-",
+                f"--vf=format=fmt=yuv420p",#,fps={self.fps}",
+                "--of=matroska",     # Set output format to raw video
+                 "-o", "-",
+                 "--no-config",
                 f"--input-ipc-server={self.mpv_ipc_control_pipe}",
-                 "--msg-level=all=warn"
+                #  "--msg-level=all=warn"
             ]
             # cmd = 'start cmd /k mpv_.com "D:/soft/media/[Judas] Boku no Hero Academia - S07E07.mkv" --ovc=rawvideo '
             # cmd+= '--oac=pcm_s16le --vf=format=fmt=rgb24 --of=avi -o - --input-ipc-server=\\\\.\\pipe\\mpv_iw3_hls_pipe'
 
             # cmd = " ".join(cmd)
             ffmpeg_cmd += [
-            '-f', 'avi', 
+            '-f', 'matroska', 
             # '-pixel_format', 'rgb24', '-video_size', f'{self.width}x{self.height}',
             # '-framerate', str(self.fps),
             '-i', "-"]
                         
-            source_process = subprocess.Popen(mpv_command, stdout=subprocess.PIPE)#, shell=True)
-            # time.sleep(5)
+            self.source_process = subprocess.Popen(mpv_command, stdout=subprocess.PIPE,  bufsize=10**8 )#, stderr=subprocess.PIPE)#, shell=True)
+            time.sleep(1)
         else:
             ffmpeg_cmd += [
                 #  "-rtbufsize", "100MB",# 
@@ -467,11 +468,12 @@ class HLSEncoder:
             
             '-f', 'rawvideo',
             "-bufsize", "10M",
+            
             '-pix_fmt', 'rgb24', "-r", str(self.video_info[1]),
             self.video_pipe_name,
             "-y",
-            "-bufsize", "10M",
-            '-acodec', codec_map[self.audio_bits_per_sample],
+
+            # '-acodec', codec_map[self.audio_bits_per_sample],
             '-ac', str(self.audio_channels),
             '-ar', str(self.audio_sample_rate),
             '-f', 's16le',
@@ -481,9 +483,21 @@ class HLSEncoder:
         ]
         
         
-        self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=source_process.stdout if use_mpv else None, bufsize=10**8)
-        #, shell=True)                       #    stdout=subprocess.PIPE, #    stderr=subprocess.PIPE
+        self.ffmpeg_process = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, bufsize=10**8 )
+        #, shell=True)                       #    stdout=subprocess.PIPE, #    
 
+
+        if use_mpv:
+            def loop():
+                time.sleep(1)
+                data = b''
+                while 1:
+                    chunk = self.source_process.stdout.read(1024*1024)
+                    if not chunk:
+                        break
+                    self.ffmpeg_process.stdin.write(chunk)
+                    print("tick")
+            threading.Thread(target=loop, daemon=True).start()
 
     def read_peek(self, handle, read_size=1024):
         result = win32pipe.PeekNamedPipe(handle, 0)  # 0 means don't read any data
@@ -538,19 +552,20 @@ class HLSEncoder:
                     frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
                     
                 self.decode_queue.put(frame)
+                time.sleep(0.001)
         except Exception as e:
             print(f"[Video Pipe] Read error: {e}")
 
     def read_audio_pipe(self):
         """Read audio data from pipe and push to queue."""
-        win32pipe.ConnectNamedPipe(self.out_audio_pipe, None)
+        # win32pipe.ConnectNamedPipe(self.out_audio_pipe, None)
         print("out_named_pipe_connected")
         self.audio_out_fut.set_result(True)
-        def piper():
-            while 1:
-                d = self.audio_queue.get()
-                self.write_peek(self.out_audio_pipe, d)
-        threading.Thread(target=piper, daemon=True).start()
+        # def piper():
+        #     while 1:
+        #         d = self.audio_queue.get()
+        #         self.write_peek(self.out_audio_pipe, d)
+        # threading.Thread(target=piper, daemon=True).start()
         
         try:
             read_size_ = 256*256 #self.bytes_per_second#(256*256*32)
@@ -581,6 +596,7 @@ class HLSEncoder:
                 # for x in range(1):
                 #     self.write_peek(self.out_audio_pipe, data)
                 self.audio_queue.put(data)
+                time.sleep(0.001)
                 continue
                 bytes_written = 0
                 while bytes_written < le:
@@ -693,11 +709,11 @@ class HLSEncoder:
     #             process.terminate()
     #         print("MPV process terminated.")
     
-  
+    
 
-    def encode_to_hls(self, bitrate= 3*1000*1000, serve_while_generating=True):
-        """Encode to HLS format with video and audio using separate ffmpeg process"""
-        width, height, framerate =  self.video_stream_ready.result()
+    def encode_to_hls(self, bitrate=3*1000*1000, serve_while_generating=True):
+        """Encode to HLS format with video and audio using PyAV"""
+        width, height, framerate = self.video_stream_ready.result()
         print("Encode started", width, height, framerate)
         os.makedirs(self.output_dir, exist_ok=True)
         
@@ -707,7 +723,7 @@ class HLSEncoder:
         
         # Check if input has audio
         input_container = av.open(self.input_file)
-        has_audio =  any(stream.type == 'audio' for stream in input_container.streams)
+        has_audio = any(stream.type == 'audio' for stream in input_container.streams)
         input_container.close()
 
         if self.args.full_sbs:
@@ -722,114 +738,63 @@ class HLSEncoder:
                 
         width = width * frame_width_scale
         
-        # Build ffmpeg command
+        # Build output container
         output_path = os.path.join(self.output_dir, 'master.m3u8')
-        segment_pattern = os.path.join(self.output_dir, 'segment_%03d.ts')
         
-        ffmpeg_cmd = ["ffmpeg"]
-
+        # Create output container with HLS format
+        output_container = av.open(output_path, mode='w', format='hls')
         
-        if has_audio:
-            ffmpeg_cmd.extend([
-                "-probesize", "10KB",  "-rtbufsize", "100MB",
-                "-f", "s16le",
-                '-ac', str(self.audio_channels),
-            '   -ar', str(self.audio_sample_rate),
-                '-i', self.out_audio_pipe_name, "-y",  # Use original file for audio
-            ])
-        else:
-            ffmpeg_cmd.extend(['-an'])  # No audio
+        # Configure HLS options
+        output_container.options.update({
+            'hls_time': str(self.ff_hls_time),
+            'hls_list_size': str(self.ff_hls_list_size),
+            'hls_flags': 'independent_segments+append_list',
+            'hls_segment_type': 'mpegts',
+            'hls_playlist_type': 'event',
+            'hls_segment_filename': os.path.join(self.output_dir, 'segment_%03d.ts')
+        })
         
-        ffmpeg_cmd.extend(
-            [
-            # '-y',  # Overwrite output files
-            '-f', 'rawvideo',
-            '-pix_fmt', 'bgr24',  # Match your frame format
-            '-s', f'{width}x{height}',
-            '-r', str(framerate),
-            '-i', '-',  # Read from stdin
-            # '-y',  # Overwrite output files
-        ])
-        if has_audio:             
-            ffmpeg_cmd.extend(['-map', '1:v',  '-map', '0:a'])
-
-        ffmpeg_cmd.extend([
-            '-f', 'hls',
-            '-hls_time', str(self.ff_hls_time),
-            '-hls_list_size', str(self.ff_hls_list_size),
-            '-hls_flags', 'independent_segments+append_list',
-            '-hls_segment_type', 'mpegts',
-            '-hls_segment_filename', segment_pattern,
-            '-hls_playlist_type', 'event',
-            # output_path
-        ])
+        # Add video stream
+        video_stream = output_container.add_stream(
+            'h264_nvenc' if self.args.gpu_encoding else 'libx264',
+            # rate=framerate
+        )
+        video_stream.width = width
+        video_stream.height = height
+        video_stream.pix_fmt = 'yuv420p'
         
-        
+        # Configure video codec options
         if self.args.gpu_encoding:
-            video_codec = 'h264_nvenc'
-            video_options = [
-                '-c:v', video_codec,
-                '-preset', 'p1',
-                '-cq', '23',
-                '-rc', 'constqp',
-                "-g", "144",
-            ]
+            video_stream.options.update({
+                'preset': 'p1',
+                'cq': '23',
+                'rc': 'constqp',
+                'g': '144',
+            })
         else:
-            video_codec = 'libx264'
-            video_options = [
-                '-c:v', video_codec,
-                '-preset', 'ultrafast',
-                '-crf', '20',
-                '-tune', 'zerolatency',
-            ]
-
+            video_stream.options.update({
+                'preset': 'ultrafast',
+                'crf': '20',
+                'tune': 'zerolatency',
+            })
         
-        ffmpeg_cmd.extend(video_options)
+        # Add audio stream if available
+        audio_stream = None
+        if has_audio:
+            audio_stream = output_container.add_stream('aac')
+            audio_stream.sample_rate = self.audio_sample_rate
+            # audio_stream.channels = self.audio_channels
         
-        ffmpeg_cmd.append(output_path)
-
-        print(f"\nRunning ffmpeg command: {' '.join(ffmpeg_cmd)}\n")
+        print(f"\nStarting PyAV encoding to HLS\n")
         
-
-        # time.sleep(1)100 000 000
         try:
-            # ffmpeg_cmd = r"ffmpeg  -f s16le -ar 44100 -ac 2 -i \\.\pipe\out_ffmpeg_audio_pipe__  -f rawvideo -pix_fmt bgr24 -s 3840x1080 -r 23.976023976023978 -i -output.mp4".split(" ")
-
-            
-            ffmpeg_process = subprocess.Popen(
-                ffmpeg_cmd,#shell=True,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                # stderr=subprocess.PIPE,
-                bufsize=10**8  # Large buffer for video frames
-            )
-            # time.sleep(1)
-            
-            def monitor_ffmpeg():
-
-                while self.running and ffmpeg_process.poll() is None:
-                    try:
-                        line = ffmpeg_process.stderr.readline().decode('utf-8')
-                        if line:
-                            print(f"ffmpeg: {line.strip()}")
-                    except:
-                        break
-            
-            # Start monitoring thread
-            monitor_thread = threading.Thread(target=monitor_ffmpeg)
-            monitor_thread.daemon = True
-            monitor_thread.start()
-            
             # Encoding loop
-            c = self.c
-            video_finished = False
-            # self.audio_out_fut.result()
             print("Encoder started")
-            while self.running and not video_finished:
+            frame_count = 0
+            
+            while self.running:
                 if self.encode_queue.qsize():
                     try:
-                        # c.pt()
-
                         sbs = self.encode_queue.get()
                         sbs = (sbs * 255).to(torch.uint8)
                         
@@ -845,42 +810,52 @@ class HLSEncoder:
                             img_np_bgr = img_np
                         
                         img_np_bgr = np.ascontiguousarray(img_np_bgr)
-                        # c.ct(1)
-
-                        # Write frame to ffmpeg stdin
-                        try:
-                            ffmpeg_process.stdin.write(img_np_bgr)
-                        except BrokenPipeError:
-                            print("ffmpeg process terminated unexpectedly")
-                            break
                         
+                        # Create AV frame from numpy array
+                        frame = av.VideoFrame.from_ndarray(img_np_bgr, format='bgr24')
+                        
+                        # Encode video frame
+                        for packet in video_stream.encode(frame):
+                            output_container.mux(packet)
+                        
+                        frame_count += 1
                         
                     except queue.Empty:
                         pass
                     except Exception as e:
                         print(f"Error processing frame: {e}")
                         break
+                if self.audio_queue.qsize() and audio_stream:
+                    raw_buffer = self.audio_queue.get()
+                    audio_array = np.frombuffer(raw_buffer, dtype=np.int16)
+                    audio_array = audio_array.reshape(-1, self.audio_channels)
+                    audio_array_float = audio_array.astype(np.float32) / 32768.0
+
+                    # Transpose first, then make contiguous
+                    audio_array_float_t = audio_array_float.T
+                    audio_array_float_contiguous = np.ascontiguousarray(audio_array_float_t)
+
+                    frame = av.AudioFrame.from_ndarray(audio_array_float_contiguous, format='fltp', layout='stereo')
+                    frame.sample_rate = self.audio_sample_rate
+    
+                    for packet in audio_stream.encode(frame):
+                        output_container.mux(packet)
+
+                time.sleep(0.00001)
             
-                time.sleep(0.001)
+
+            for packet in video_stream.encode():
+                output_container.mux(packet)
+            
 
             
-            if ffmpeg_process.stdin:
-                ffmpeg_process.stdin.close()
-        
-            try:
-                ffmpeg_process.wait(timeout=30)
-                print("HLS encoding complete.")
-            except subprocess.TimeoutExpired:
-                print("ffmpeg process timed out, terminating...")
-                ffmpeg_process.terminate()
-                ffmpeg_process.wait()
+            print("HLS encoding complete.")
             
         except Exception as e:
             print(f"Encoding error: {e}")
-            # Clean up ffmpeg process if it exists
-            if 'ffmpeg_process' in locals() and ffmpeg_process.poll() is None:
-                ffmpeg_process.terminate()
         finally:
+            # Close output container
+            output_container.close()
             self.running = False
             
             if serve_while_generating:

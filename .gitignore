@@ -210,3 +210,5 @@ cython_debug/
 .vscode/launch.json
 /hls_output
 /hls_out
+*.wav
+test.mkv

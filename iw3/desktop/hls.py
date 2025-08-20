@@ -1,4 +1,5 @@
 
+import time
 from .utils import (
     init_win32,
     create_parser, set_state_args,
@@ -82,6 +83,7 @@ def iw3_desktop_main_hls(args):
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
                 vp.encode_queue.put(sbs)
                 # c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()} | ")
+                time.sleep(0.01)
 
                 if count % (30 * vp.video_info[2]) == 0:
                     gc_collect()
