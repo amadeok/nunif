@@ -762,12 +762,12 @@ def process_video(input_path, output_path,
                          container_duration=container_duration)
     pbar = tqdm_fn(desc=desc, total=total, ncols=ncols)
     streams = [s for s in [video_input_stream, audio_input_stream] if s is not None]
-    pt = time.time()
-    ct = pt
+    # pt = time.time()
+    # ct = pt
     
-    import subprocess
-    from io import BytesIO
-    import win32file, win32pipe,threading
+    # import subprocess
+    # from io import BytesIO
+    # import win32file, win32pipe,threading
 
 
     
@@ -812,7 +812,7 @@ def process_video(input_path, output_path,
                         enc_packet = video_output_stream.encode(new_frame)
                         if enc_packet:
                             output_container.mux(enc_packet)
-                        # pbar.update(1)
+                        pbar.update(1)
 
 
         elif packet.stream.type == "audio":
@@ -862,47 +862,47 @@ def process_video(input_path, output_path,
     input_container.close()
     
     
-    while 1:
-        buffer.seek(0)
-        data = buffer.getvalue()
-        le = len(data)  
-        if le:
-            # Write to disk instead of process.stdin
-            with open('output_file.dat', 'ab') as f:  # 'ab' for append binary
-                f.write(data)
-            with open('output_file.dat', 'rb') as f:  # 'ab' for append binary
-                data1 = f.read()
-            data_ = data[le-100:]
-            data1_ = data[le-100:]
-            print("\n\n",data_, "\n\n")
-            print(data1_)
-            print(len(data_), len(data1_))
-            for x in range(min(len(data_), len(data1_))):
-                if data_[x] != data1_[x]:
-                    print("-", x,  data_[x], data_[x])
-            # assert data_ == data1_
-            # Keep writing until all bytes are written
-            total_written = 0
-            while total_written < le:
-                ret = win32file.WriteFile(args.pipe, data[total_written:])
-                # ret is typically (error_code, bytes_written)
-                if isinstance(ret, tuple):
-                    bytes_written = ret[1]
-                else:
-                    # Handle case where ret might just be the bytes count
-                    bytes_written = ret
+    # while 1:
+    #     buffer.seek(0)
+    #     data = buffer.getvalue()
+    #     le = len(data)  
+    #     if le:
+    #         # Write to disk instead of process.stdin
+    #         with open('output_file.dat', 'ab') as f:  # 'ab' for append binary
+    #             f.write(data)
+    #         with open('output_file.dat', 'rb') as f:  # 'ab' for append binary
+    #             data1 = f.read()
+    #         data_ = data[le-100:]
+    #         data1_ = data[le-100:]
+    #         print("\n\n",data_, "\n\n")
+    #         print(data1_)
+    #         print(len(data_), len(data1_))
+    #         for x in range(min(len(data_), len(data1_))):
+    #             if data_[x] != data1_[x]:
+    #                 print("-", x,  data_[x], data_[x])
+    #         # assert data_ == data1_
+    #         # Keep writing until all bytes are written
+    #         total_written = 0
+    #         while total_written < le:
+    #             ret = win32file.WriteFile(args.pipe, data[total_written:])
+    #             # ret is typically (error_code, bytes_written)
+    #             if isinstance(ret, tuple):
+    #                 bytes_written = ret[1]
+    #             else:
+    #                 # Handle case where ret might just be the bytes count
+    #                 bytes_written = ret
                 
-                if bytes_written == 0:
-                    # No bytes written, might indicate an error or EOF
-                    break
+    #             if bytes_written == 0:
+    #                 # No bytes written, might indicate an error or EOF
+    #                 break
                     
-                total_written += bytes_written
+    #             total_written += bytes_written
                 
-            args.pipe.close()
-            buffer.seek(0)
-            buffer.truncate()
-        else:
-            break
+    #         args.pipe.close()
+    #         buffer.seek(0)
+    #         buffer.truncate()
+    #     else:
+    #         break
 
     if not (stop_event is not None and stop_event.is_set()):
         # success

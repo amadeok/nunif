@@ -41,18 +41,18 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
     
-    args.pipe = create_pipe()
+    # args.pipe = create_pipe()
     
-            # Spawn MPV with stdin input
-    def mpv():
-        process = subprocess.Popen(
-            [r'C:\Users\amade\rifef _\mpv-x86_64\mpv_.com', '-', f"<  {pipe_name}"],  # '-' indicates stdin
-            # stdin=subprocess.PIPE,
-            # stdout=subprocess.DEVNULL,
-            # stderr=subprocess.DEVNULL
-        )
-    # threading.Timer(1, mpv).start()    
-    win32pipe.ConnectNamedPipe(args.pipe, None)
+    #         # Spawn MPV with stdin input
+    # def mpv():
+    #     process = subprocess.Popen(
+    #         [r'C:\Users\amade\rifef _\mpv-x86_64\mpv_.com', '-', f"<  {pipe_name}"],  # '-' indicates stdin
+    #         # stdin=subprocess.PIPE,
+    #         # stdout=subprocess.DEVNULL,
+    #         # stderr=subprocess.DEVNULL
+    #     )
+    # # threading.Timer(1, mpv).start()    
+    # win32pipe.ConnectNamedPipe(args.pipe, None)
     
     # time.sleep(1)
     
