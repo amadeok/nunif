@@ -145,8 +145,6 @@ def create_parser():
     parser.add_argument("--crop-left", type=int, default=0, help="Crop pixels from left when using --window-name")
     parser.add_argument("--crop-right", type=int, default=0, help="Crop pixels from right when using --window-name")
     parser.add_argument("--crop-bottom", type=int, default=0, help="Crop pixels from bottom when using --window-name")
-    parser.add_argument("--hls", action="store_true", help="Use hls")
-    parser.add_argument("--hls_input", type=str, help="input_file")
     
 
     parser.set_defaults(

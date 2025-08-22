@@ -2,7 +2,7 @@
 import time
 from .utils import (
     init_win32,
-    create_parser, set_state_args,
+    set_state_args,
     iw3_desktop_main_hls
 )
 
@@ -62,7 +62,7 @@ def iw3_desktop_main_hls(args):
     )
 
     vp = HLSEncoder(args.input_file, args.segment_folder, args=args)
-    vp.start()
+    vp.restart()
     
     try:
         if args.compile:
@@ -73,17 +73,21 @@ def iw3_desktop_main_hls(args):
 
         while True:
             with args.state["args_lock"]:
-                # c.pt()
+                
 
                 frame =  vp.decode_queue.get()
+
                 if type(frame) != torch.Tensor and not frame:
                     print("Decode terminated")
                     break
+                # c.pt()
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
-                vp.encode_queue.put(sbs)
                 # c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()} | ")
-                time.sleep(0.01)
+
+                vp.encode_queue.put(sbs)
+
+                # time.sleep(0.001)
 
                 if count % (30 * vp.video_info[2]) == 0:
                     gc_collect()
@@ -113,7 +117,7 @@ def create_parser():
     parser.add_argument("--full-sbs", action="store_true", help="Use Full SBS for Pico4")
     parser.add_argument("--input_file", type=str, help="input_file")
     parser.add_argument("--segment_folder", type=str, help="output for the video segment files ", default="hls_out")
-    parser.add_argument("--gpu_encoding", type=bool, help="encode video with gpu", default=True)
+    parser.add_argument("--nvenc-preset", type=str, help="nvenc preset", default="p1")
     
 
     parser.set_defaults(
