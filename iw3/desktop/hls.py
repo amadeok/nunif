@@ -62,7 +62,7 @@ def iw3_desktop_main_hls(args):
     )
 
     vp = HLSEncoder(args.input_file, args.segment_folder, args=args)
-    vp.restart()
+    vp.start()
     
     try:
         if args.compile:
@@ -75,7 +75,7 @@ def iw3_desktop_main_hls(args):
             with args.state["args_lock"]:
                 
 
-                frame =  vp.decode_queue.get()
+                frame =  vp.decode_video_queue.get()
 
                 if type(frame) != torch.Tensor and not frame:
                     print("Decode terminated")
@@ -83,9 +83,9 @@ def iw3_desktop_main_hls(args):
                 # c.pt()
 
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
-                # c.tick(f" {vp.audio_queue.qsize()}  {vp.decode_queue.qsize()}, {vp.encode_queue.qsize()} | ")
+                if vp.b_print_debug:vp.print_debug()
 
-                vp.encode_queue.put(sbs)
+                vp.encode_video_queue.put(sbs)
 
                 # time.sleep(0.001)
 
