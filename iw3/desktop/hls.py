@@ -108,6 +108,10 @@ def iw3_desktop_main_hls(args):
     return args
 
 
+from gooey import Gooey
+import argparse
+
+# @Gooey  # ← Just add this decorator
 def create_parser():
 
     parser = IW3U.create_parser(required_true=False)
@@ -129,6 +133,7 @@ def create_parser():
         ema_normalize=True,
     )
     return parser
+
 
 def cli_main():
     init_win32()

@@ -35,7 +35,7 @@ from global_hotkeys import register_hotkeys, start_checking_hotkeys
 
 
 class HLSEncoder:
-    def __init__(self, input_f, output_dir, args, ff_hls_time=4, ff_hls_list_size=0):
+    def __init__(self, input_f, output_dir, args, ff_hls_time=6, ff_hls_list_size=0):
         self.input_file = input_f
         self.ff_hls_time = ff_hls_time
         self.ff_hls_list_size = ff_hls_list_size
@@ -152,9 +152,11 @@ class HLSEncoder:
 
         # self.handler.set_click_callback(notepad_hwnd, my_click_callback)
 
-        def toggle_print_debug():  self.b_print_debug = not self.b_print_debug
+        def toggle_print_debug(): 
+            self.print_debug()
+            self.b_print_debug = not self.b_print_debug
 
-        bindings = [["window + f10", None, lambda:self.seek_perc_at_keyframe(get_number()), False],
+        bindings = [["window + f2", None, lambda:self.seek_perc_at_keyframe(get_number()), False],
                     ["window + f11", None, toggle_print_debug, False],
                     ["window + f12", None, self.quit_encode_mpv, False]
                     ]
@@ -170,8 +172,8 @@ class HLSEncoder:
                 self.seek_perc_at_keyframe(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
-        threading.Thread(target=test, daemon=True).start()
-        # httpd = start_http_server(self.output_dir, self)
+        #threading.Thread(target=test, daemon=True).start()
+        httpd = start_http_server(self.output_dir, self)
 
     def print_debug(self):
         self.c.tick(f"q-> da: {self.decode_audio_queue.qsize()} dv: {self.decode_video_queue.qsize()} ev: {self.encode_video_queue.qsize()}| v: {self.decoded_video_frames_n} a: {self.decoded_audio_frames_n} | ")
@@ -420,8 +422,10 @@ class HLSEncoder:
                 bufsize=self.video_frame_size
             )
             print("Video MPV instance started successfully!")
-
+            
             while True:
+                while self.is_paused:
+                    time.sleep(0.1)
                 data = read_frame_of_size(self.decode_video_mpv_proc.stdout, self.video_frame_size, self.video_frame_size )
 
                 framergb = np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 3))
@@ -513,6 +517,8 @@ class HLSEncoder:
                 "-c:v", self.args.video_codec,
                 "-pix_fmt", "yuv420p",  #important, otherwise will encode in unsupported pi
                 *video_opts,
+                "-g", f"{self.fps*self.ff_hls_time}",
+                "-keyint_min", f"{self.fps*self.ff_hls_time}",
                 "-r", str(self.fps),  # Output framerate
                 "-c:a", "aac",  # Audio codec (adjust as needed)
                 *hls_opts,
@@ -856,8 +862,14 @@ class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         print(f"Requested file: {self.path}")  # Log the requested path
-        # if self.path.endswith(".ts") and hasattr(self, "vp"):
-        #     self.vp.last_req_seg_n = extract_n(self.path) or 0
+        self.vp : HLSEncoder = self.vp
+
+        # If root path is requested, serve master.m3u8 instead
+        if self.path == '/' or self.path == '/index.html':
+            self.path = os.path.join(self.vp.output_dir ,'/master.m3u8')
+        
+        if self.path.endswith(".ts") and hasattr(self, "vp"):
+            self.vp.last_req_seg_n = extract_n(self.path) or 0
 
         super().do_GET()
 
@@ -869,17 +881,16 @@ def start_http_server(output_dir, vp):
     server_address = ('0.0.0.0', vp.args.port)
 
     handler = LoggingHTTPRequestHandler
-    handler.vp = vp
+    handler.vp  = vp
 
     httpd = HTTPServer(server_address, handler)  # Use our custom handler
 
-
     def run_server():
         print(f"Serving HLS stream at http://localhost:{vp.args.port}/master.m3u8")
+        print(f"Root path (/) will automatically serve master.m3u8")
         httpd.serve_forever()
 
     thread = threading.Thread(target=run_server)
     thread.daemon = True
     thread.start()
     return httpd
-
