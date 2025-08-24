@@ -27,7 +27,7 @@ from pynput import mouse
 import win32gui,win32pipe, win32file
 import keyboard
 
-import time
+import time, shutil
 
 from .decode_encode_utils import *
 from global_hotkeys import register_hotkeys, start_checking_hotkeys
@@ -41,12 +41,17 @@ class HLSEncoder:
         self.ff_hls_list_size = ff_hls_list_size
         self.seg_delta_pause_thres = 2
         self.subtitle_id = 1
-        ###
-        self.b_print_debug = False
         self.restart_mpv_decode_on_seek = True
+        self.mpv_bin = "mpv_.com"# os.path.join(os.path.expanduser("~"), r"rifef _\mpv-x86_64-v3-20250824-git-5faec4e\mpv.com") 
+        self.use_ffmpeg_encoder = True
+        ###
+        
+        self.b_print_debug = False
         self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "encode":"v" }
         #fatal error warn info status v debug trace
         ###
+        assert shutil.which(self.mpv_bin)
+
         self.decode_audio_mpv_ipc_pipe_name = r'\\.\pipe\iw3_decode_audio_mpv_ipc_pipe___'
         self.decode_video_mpv_ipc_pipe_name = r'\\.\pipe\iw3_decode_video_mpv_ipc_pipe___'
         self.encode_audio_mpv_ipc_pipe_name = r'\\.\pipe\iw3_encode_video_mpv_ipc_pipe___'
@@ -162,9 +167,9 @@ class HLSEncoder:
                 time.sleep(10)
                 perc = random.uniform(0, 80)
                 print("----> seeking", perc, " ---")
-                # self.seek_perc_at_keyframe(perc)
-                set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
-                sid+=1
+                self.seek_perc_at_keyframe(perc)
+                # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
+                # sid+=1
         threading.Thread(target=test, daemon=True).start()
         # httpd = start_http_server(self.output_dir, self)
 
@@ -182,11 +187,11 @@ class HLSEncoder:
                 if self.seg_delta >= self.seg_delta_pause_thres:
                     print("- Pausing", self.seg_delta, " -")
                     self.is_paused = True
-                    pause_unpause('pause', self.encode_mpv_pipe_name)
+                    # pause_unpause('pause', self.encode_mpv_pipe_name)
                 else:
                     print("- Resuming", self.seg_delta, " -")
                     self.is_paused = False
-                    pause_unpause('unpause', self.encode_mpv_pipe_name)
+                    # pause_unpause('unpause', self.encode_mpv_pipe_name)
             time.sleep(1)
 
     def get_last_peek_sizes(self):
@@ -197,15 +202,15 @@ class HLSEncoder:
         print("Listener stopped.")
 
     def init_dir(self):
-        import shutil
-
-        if os.path.exists(self.output_dir):
+        def try_del():
             try:
                 shutil.rmtree(self.output_dir)
             except Exception as e:
                 print("Error cleaning up:", e)
+                
         while os.path.isdir(self.output_dir):#or len(os.listdir(self.output_dir)):
             print("Wait for delete")
+            try_del()
             time.sleep(0.01)
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -338,7 +343,7 @@ class HLSEncoder:
         """Spawn MPV instance for audio decoding."""
 
         audio_args =  [
-            'mpv_.com',
+            self.mpv_bin,
             self.input_file,
             '--no-config',
             "--hr-seek=no",
@@ -394,7 +399,7 @@ class HLSEncoder:
     def video_decoder(self):
         
         video_args = [ 
-            'mpv_.com', self.input_file, '--no-config',
+            self.mpv_bin, self.input_file, '--no-config',
             f"--start={self.__seek_start_time if self.restart_mpv_decode_on_seek else 0}",  
             *([f"--sid={self.subtitle_id}", "--vf=sub"] if self.subtitle_id != None else  []),
             "--hr-seek=no",
@@ -442,91 +447,163 @@ class HLSEncoder:
                 de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
                 for x in range(de if de > 2 else 1):
                     self.sync_queue.put(1)
-                    if x > 0:
-                        print("sync queue", x," de:", de, "qs:",self.sync_queue.qsize(), " --")
+                    # if x > 0:
+                    #     print("sync queue", x," de:", de, "qs:",self.sync_queue.qsize(), " --")
                 
         except Exception as e:
             print(f"Video read error: {e}")
 
+    def get_encoder_cmd(self, out_width):
+
+
+        playlist_path = os.path.join(self.output_dir, 'playlist.m3u8')
+        segment_pattern_path = os.path.join(self.output_dir, 'segment_%03d.ts')
+            
+        codec = self.args.video_codec
+
+        output_hls = True
+        
+        if self.use_ffmpeg_encoder:
+            buf_settings = [
+                 "-probesize", "1KB", #"-thread_queue_size", "500000",# "-rtbufsize", "20000000"
+            ]
+                        
+            ofopts = ''
+            if not "nvenc" in codec:
+                video_opts = [
+                    "-preset", self.args.preset,
+                    "-b:v", self.args.video_bitrate
+                ]
+                ofopts = ["-movflags", "+frag_keyframe+empty_moov"]
+            else:
+                video_opts = [
+                    "-preset", self.args.nvenc_preset,
+                    "-rc", "vbr",
+                    "-cq", "18",
+                    "-b:v", "0",
+                    "-bufsize", "20M",
+                    "-profile", "high"
+                ]
+
+            if output_hls:
+                hls_opts = [
+                    "-f", "hls",
+                    "-hls_time", str(self.ff_hls_time),
+                    "-hls_list_size", str(self.ff_hls_list_size),
+                    "-hls_flags", "independent_segments+append_list",
+                    "-hls_segment_type", "mpegts",
+                    "-hls_segment_filename", segment_pattern_path,
+                    "-hls_playlist_type", "event"
+                ]
+            else:
+                hls_opts = ["-f", "mp4"]
+
+            cmd = [
+                "ffmpeg",
+                *buf_settings,
+                "-i", self.encode_mpv_pipe_name,  # External audio file
+                "-f", "rawvideo",
+                "-pixel_format", "bgr24",
+                "-video_size", f"{out_width}x{self.height}",
+                "-framerate", str(self.fps),
+                # "-thread_queue_size", "50000",
+                "-i", "-", 
+                "-map", "0:a:0", 
+                "-map", "1:v:0", 
+                "-c:v", self.args.video_codec,
+                "-pix_fmt", "yuv420p",  #important, otherwise will encode in unsupported pi
+                *video_opts,
+                "-r", str(self.fps),  # Output framerate
+                "-c:a", "aac",  # Audio codec (adjust as needed)
+                *hls_opts,
+                *ofopts,
+                "-y",  # Overwrite output file
+                playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4"
+            ]
+
+            # Remove empty strings if any
+            cmd = [arg for arg in cmd if arg]
+        else:
+            ofopts = f''
+            if not "nvenc" in codec:
+                ovcopts=f"preset={ self.args.preset},b={self.args.video_bitrate}"
+                ofopts =  f'movflags=+frag_keyframe+empty_moov'
+            else:
+                ovcopts= ",".join([
+                        f"preset={ self.args.nvenc_preset}",
+                        "rc=vbr",
+                        "cq=18",           # Direct quality control (18 is very high quality)
+                        "b=0",           # Required for -cq mode
+                        #"maxrate=10M",     # Optional safety net: max bitrate
+                        "bufsize=20M",     # Buffer size (2x maxrate)
+                        "profile=high"
+                    ])
+            ofopts = ",".join([
+                        # '-f', 'hls',
+                        # f"r={self.fps}",
+                        f'hls_time={self.ff_hls_time}',
+                        f'hls_list_size={self.ff_hls_list_size}',
+                        f'hls_flags=independent_segments+append_list',
+                        # f'hls_flags=single_file',
+                        f'hls_segment_type=mpegts',
+                        f'hls_segment_filename={segment_pattern_path}',
+                        f'hls_playlist_type=event',
+                    ])
+                
+            cmd = [
+                    self.mpv_bin,
+                    "-",
+                    f"--cache-secs=2", "--cache=yes",
+                    # r'd:\1.mkv',  
+                    '--no-config', # Ignore user configurations for predictable behavior in scripts
+                    # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
+                    '--demuxer=rawvideo',
+                    f'--demuxer-rawvideo-w={out_width}',
+                    f'--demuxer-rawvideo-h={self.height}',
+                    '--demuxer-rawvideo-mp-format=bgr24',
+                    f'--demuxer-rawvideo-fps={self.fps}',
+                    "--aid=2",
+                    f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
+                    #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
+                    #  "--of=dash",
+                    '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
+                    f'--ovc={self.args.video_codec}',
+                    f'--ovcopts={ovcopts}', # Options for the video codec
+                    f"--of={'hls' if output_hls else 'mp4'}",
+                    f"--vf=format=fmt=yuv420p",  #important 
+                    f"--vf=fps={self.fps}",
+                    f'--ofopts={ofopts}', # Output format options
+                    '--input-ipc-server=' + self.encode_audio_mpv_ipc_pipe_name,
+                    f"--msg-level=all={self.mpv_log_levels['encode']}",
+                ]
+            cmd_ = " ".join(cmd)
+            print("\ncmd", cmd_, "\n")
+        return cmd
+
+            
     def encoder(self):
         print("Encoder started")
 
-        print(f"Named pipe created: {self.encode_mpv_pipe_name}")
+        out_audio_pipe_size = self.audio_bytes_per_second*3 if self.use_ffmpeg_encoder else 1024*1024*1
 
         self.pipe = win32pipe.CreateNamedPipe(
             self.encode_mpv_pipe_name,
             win32pipe.PIPE_ACCESS_DUPLEX,
             win32pipe.PIPE_TYPE_BYTE | win32pipe.PIPE_WAIT,
-            2, 65536*1, 65536*1, 0, None
+            2, out_audio_pipe_size, out_audio_pipe_size, 0, None
         )
-
-        out_width = self.get_output_width(self.width)
-
-
-        playlist_path = os.path.join(self.output_dir, 'master.m3u8')
-        segment_pattern_path = os.path.join(self.output_dir, 'segment_%03d.ts')
-        
-        codec = self.args.video_codec
-
-        output_hls = True
-
-        ofopts = f'movflags=+frag_keyframe+empty_moov'
-        if not "nvenc" in codec:
-            ovcopts=f"preset={ self.args.preset},b={self.args.video_bitrate}"
-            # ofopts = ofopts
-        else:
-            ovcopts= ",".join([
-                f"preset={ self.args.nvenc_preset}",
-                "rc=vbr",
-                "cq=18",           # Direct quality control (18 is very high quality)
-                "b=0",           # Required for -cq mode
-                #"maxrate=10M",     # Optional safety net: max bitrate
-                "bufsize=20M",     # Buffer size (2x maxrate)
-                "profile=high"
-            ])
-        ofopts += ","+ ",".join([
-                # '-f', 'hls',
-                f'hls_time={self.ff_hls_time}',
-                f'hls_list_size={self.ff_hls_list_size}',
-                f'hls_flags=independent_segments+append_list',
-                # f'hls_flags=single_file',
-
-                f'hls_segment_type=mpegts',
-                f'hls_segment_filename={segment_pattern_path}',
-                f'hls_playlist_type=event',
-            ])
-
+        print(f"Output audio named pipe created: {self.encode_mpv_pipe_name} with size {out_audio_pipe_size} ")
 
         try:
+            out_width = self.get_output_width(self.width)
 
-            cmd = [
-                'mpv_.com',
-                "-",
-                f"--cache-secs=2", "--cache=yes",
-                # r'd:\1.mkv',  # Read raw video from stdin (file descriptor 0)
-                '--no-config', # Ignore user configurations for predictable behavior in scripts
-                # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
-                '--demuxer=rawvideo',
-                f'--demuxer-rawvideo-w={out_width}',
-                f'--demuxer-rawvideo-h={self.height}',
-                '--demuxer-rawvideo-mp-format=bgr24',
-                f'--demuxer-rawvideo-fps={self.fps}',
-                "--aid=1",
-                '--audio-file=' + self.encode_mpv_pipe_name, # Add external audio file
-                #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
-                #  "--of=dash",
-                '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
-                f'--ovc={self.args.video_codec}',
-                f'--ovcopts={ovcopts}', # Options for the video codec
-                f"--of={'hls' if output_hls else 'mp4'}",
-                f"--vf=fps={self.fps}",
-                f'--ofopts={ofopts}', # Output format options
-                '--input-ipc-server=' + self.encode_audio_mpv_ipc_pipe_name,
-                f"--msg-level=all={self.mpv_log_levels['encode']}",
-            ]
+            cmd = self.get_encoder_cmd(out_width)
             
             # time.sleep(2)
-            self.encode_process = subprocess.Popen( cmd, stdin=subprocess.PIPE, bufsize=1024*1024*1 )
+            self.encode_process = subprocess.Popen( cmd, stdin=subprocess.PIPE,
+                                                #    bufsize= self.video_frame_size if self.use_ffmpeg_encoder else 1024*1024
+                                                   )#1024*1024*1 )
+            
             win32pipe.ConnectNamedPipe(self.pipe, None)
             print("Pipe connected")
 
@@ -675,7 +752,7 @@ class HLSEncoder:
 
             # ofopts = segment_time=2,segment_format=mpegts,segment_list_size=25,segment_start_number=0,segment_list_flags=+live,segment_list=[F:\all\GitHub\vs-mlrt\scripts\server\express-hls-example\src\stream\out.m3u8]
             cmd = [
-                'mpv_.com',
+                self.mpv_bin,
                 '-',
                 '--no-config', # Ignore user configurations for predictable behavior in scripts
                 '--demuxer=rawvideo',
@@ -779,8 +856,8 @@ class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         print(f"Requested file: {self.path}")  # Log the requested path
-        if self.path.endswith(".ts") and hasattr(self, "vp"):
-            self.vp.last_req_seg_n = extract_n(self.path) or 0
+        # if self.path.endswith(".ts") and hasattr(self, "vp"):
+        #     self.vp.last_req_seg_n = extract_n(self.path) or 0
 
         super().do_GET()
 
@@ -798,7 +875,7 @@ def start_http_server(output_dir, vp):
 
 
     def run_server():
-        print(f"Serving HLS stream at http://localhost:{vp.args.port}/playlist.m3u8")
+        print(f"Serving HLS stream at http://localhost:{vp.args.port}/master.m3u8")
         httpd.serve_forever()
 
     thread = threading.Thread(target=run_server)

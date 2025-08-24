@@ -477,3 +477,9 @@ def get_keyframes(file):
 
     keyframes = sorted(set(keyframes))
     return keyframes
+
+if __name__ == "__main__":
+    import sys
+    path = "".join(sys.argv[1:])
+    print("path", path)
+    print(get_video_pixel_format_ffprobe(path))
