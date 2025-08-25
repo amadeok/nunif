@@ -72,6 +72,7 @@ def iw3_desktop_main_hls(args):
                 side_model = compile_model(side_model)
         count = 0
 
+        output_queue = vp.interpolate_input_queue if vp.interpolation_multiplier > 1 else vp.encode_video_queue
         while True:
             with args.state["args_lock"]:
                 
@@ -87,7 +88,7 @@ def iw3_desktop_main_hls(args):
                 # c.ct(1)
                 if vp.b_print_debug:vp.print_debug()
 
-                vp.encode_video_queue.put(sbs)
+                output_queue.put(sbs)
 
                 # time.sleep(0.001)
 

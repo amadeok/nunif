@@ -1,3 +1,4 @@
+import configparser
 import os, win32file, threading, io , math, struct, subprocess, win32pipe, json
 from pynput import mouse
 import  win32gui, time, pygetwindow as gw, re
@@ -40,6 +41,27 @@ def read_frame_of_size(stream, frame_size_bytes, bufsize):
     assert(len(data) == frame_size_bytes)
     return data
 
+def load_rife_config( config_file_path: str, interpolate_conf_map) -> bool:
+    config_file_path = os.path.expandvars(config_file_path)
+    config = configparser.ConfigParser()
+    config.optionxform = str  # This preserves the original case
+
+    try:
+        config.read(config_file_path)
+    except Exception as e:
+        print(f"Error reading config file: {e}")
+        return False
+    
+    if 'main' not in config:
+        print("Error: 'main' section not found in config file")
+        return False
+    
+    for key, value in config['main'].items():
+        env_key = interpolate_conf_map.get(key, key.upper())
+        os.environ[env_key] = value
+        print(f"Set {env_key} = {value}")
+        
+    return True
 
 class ThreadSafeByteFIFO:
     def __init__(self, maxsize=0):
