@@ -112,6 +112,7 @@ class HLSEncoder:
 
         self.audio_dec = self.audio_bytes_per_frame % self.audio_bytes_per_sample_and_channel
         self.audio_int = round(math.ceil(self.audio_bytes_per_frame) - self.audio_dec)
+        self.last_extra_audio_frame = 0#time.time()
         ####
         
         round_fps = round(out_fps)
@@ -205,7 +206,7 @@ class HLSEncoder:
                 self.seek_perc_at_keyframe(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
-        #threading.Thread(target=test, daemon=True).start()
+        threading.Thread(target=test, daemon=True).start()
         httpd = start_http_server(self.output_dir, self)
 
     def print_debug(self):
@@ -536,8 +537,16 @@ class HLSEncoder:
                 self.decode_video_queue.put(frame)
                 
                 de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
-                for x in range(1):
-                     self.sync_queue.put(1)
+                
+                self.sync_queue.put(1)
+                for x in range(1):     
+                    if de > 2 and self.sync_queue.qsize() < 3:
+                        self.sync_queue.put(1)
+                    #  if de > 2 and  time.time() - self.last_extra_audio_frame > 0.1:
+                    #     self.last_extra_audio_frame = time.time()
+                    #     for x in range(de+1):
+                    #         self.sync_queue.put(1)
+                        print("---- sync queue", self.sync_queue.qsize(), " ----")
                 # amount = self.interpolation_multiplier if self.interpolation_multiplier > 1 else 1
                 # if  1 or self.sync_queue.qsize() < 3:
                 # for x in range(de if de > 2 else 1):
