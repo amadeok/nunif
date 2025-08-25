@@ -35,7 +35,7 @@ def read_frame_of_size(stream, frame_size_bytes, bufsize):
         
         chunk = read(stream, read_size) #stream.read(read_size)
         if not chunk:
-            break
+            return None
         data += chunk
     assert(len(data) == frame_size_bytes)
     return data

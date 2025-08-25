@@ -47,9 +47,9 @@ class HLSEncoder:
         ###
         
         self.b_print_debug = False
-        self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "encode":"v" }
-        #fatal error warn info status v debug trace
-        ###
+        self.mpv_log_levels = {"video_decode": "status", "audio_decode": "status", "encode":"error" }
+        #mpv log level: fatal error warn info status v debug trace
+        #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
 
         self.decode_audio_mpv_ipc_pipe_name = r'\\.\pipe\iw3_decode_audio_mpv_ipc_pipe___'
@@ -99,9 +99,10 @@ class HLSEncoder:
         self.video_thread = threading.Thread(target=lambda: 1)
         self.pipe = None
 
-        self.seeking_flag = ThreadSafeValue[bool](False)
-        self.queue_audio_drop_frame = ThreadSafeValue[int](0)
+        # self.seeking_flag = ThreadSafeValue[bool](False)
+        # self.queue_audio_drop_frame = ThreadSafeValue[int](0)
         self.__seek_start_time = 0
+        self.__stop_all = False
 
         
         self.decoded_audio_frames_n = ThreadSafeValue[int](0)
@@ -180,7 +181,7 @@ class HLSEncoder:
 
 
     def check_segment_delta(self):
-        while 1:
+        while not self.__stop_all:
             self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
 
             if self.newest_seg_n is not None and self.last_req_seg_n is not None:
@@ -194,7 +195,9 @@ class HLSEncoder:
                     print("- Resuming", self.seg_delta, " -")
                     self.is_paused = False
                     # pause_unpause('unpause', self.encode_mpv_pipe_name)
-            time.sleep(1)
+            for x in range(10):
+                time.sleep(0.1)
+                if self.__stop_all: break
 
     def get_last_peek_sizes(self):
         return {e: self.last_peeked_pipe_sizes[getattr(self, e)]/(1000*1000) for e in ["audio_pipe", "video_pipe", "out_audio_pipe", "out_video_pipe"]}
@@ -251,7 +254,19 @@ class HLSEncoder:
                 print(f"dumping {av_bytes} from proc")
                 chunk = read_frame_of_size(stdout_handle, av_bytes, av_bytes)
 
-
+    def stop_all(self):
+        self.__stop_all = True
+        self.quit_audio_decode_mpv()
+        self.quit_video_decode_mpv()
+        self.quit_encode_mpv()
+        print("Joining encode thread")
+        self.encode_thread.join()
+        print("Joining audio decode thread")
+        self.audio_thread.join()
+        print("Joining video decode thread")
+        self.video_thread.join()
+        print("Joining segment check thread")
+        self.segment_thread.join()
 
     def __seek(self, time_):
         sl= 0.1
@@ -378,7 +393,8 @@ class HLSEncoder:
 
                 chunk = read_frame_of_size(self.decode_audio_mpv_proc.stdout, audio_s, audio_s)
                 if not chunk:
-                    break  # EOF reached, process has exited
+                        print("No data from mpv audio decoder, end of file?")
+                        break
                 le = len(chunk)
                 assert le == audio_s
 
@@ -427,7 +443,9 @@ class HLSEncoder:
                 while self.is_paused:
                     time.sleep(0.1)
                 data = read_frame_of_size(self.decode_video_mpv_proc.stdout, self.video_frame_size, self.video_frame_size )
-
+                if not data:
+                    print("No data from mpv video decoder, end of file?")
+                    break
                 framergb = np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 3))
 
                 # if not framergb.flags.writeable:
@@ -524,7 +542,8 @@ class HLSEncoder:
                 *hls_opts,
                 *ofopts,
                 "-y",  # Overwrite output file
-                playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4"
+                playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
+                "-loglevel",  self.mpv_log_levels['encode']
             ]
 
             # Remove empty strings if any
@@ -848,15 +867,15 @@ class HLSEncoder:
         return width
 
     def start(self):
-        self.audio_thread = threading.Thread(target=self.audio_decoder)
-        self.video_thread = threading.Thread(target=self.video_decoder)
-        self.encode_thread = threading.Thread(target=self.encoder)
-        thread = threading.Thread( target=self.check_segment_delta, daemon=True)
+        self.audio_thread = threading.Thread(target=self.audio_decoder, daemon=True)
+        self.video_thread = threading.Thread(target=self.video_decoder, daemon=True)
+        self.encode_thread = threading.Thread(target=self.encoder, daemon=True)
+        self.segment_thread = threading.Thread( target=self.check_segment_delta, daemon=True)
 
         self.audio_thread.start()
         self.encode_thread.start()
         self.video_thread.start()
-        thread.start()
+        self.segment_thread.start()
 
 class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
@@ -884,13 +903,12 @@ def start_http_server(output_dir, vp):
     handler.vp  = vp
 
     httpd = HTTPServer(server_address, handler)  # Use our custom handler
-
+    
     def run_server():
         print(f"Serving HLS stream at http://localhost:{vp.args.port}/master.m3u8")
         print(f"Root path (/) will automatically serve master.m3u8")
         httpd.serve_forever()
 
-    thread = threading.Thread(target=run_server)
-    thread.daemon = True
+    thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
     return httpd
