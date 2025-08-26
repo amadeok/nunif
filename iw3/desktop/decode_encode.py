@@ -44,9 +44,10 @@ class HLSEncoder:
         self.subtitle_id = 1
         self.restart_mpv_decode_on_seek = True
         self.mpv_bin = "mpv_.com"# os.path.join(os.path.expanduser("~"), r"rifef _\mpv-x86_64-v3-20250824-git-5faec4e\mpv.com") 
+        # self.mpv_bin = os.path.join(os.path.expanduser("~"), r"rifef _\mpv-x86_64-v3-20250824-git-5faec4e\mpv.com") 
         self.use_ffmpeg_encoder = True
         self.output_pixel_format = getattr(args, "output_pix_fmt", "yuv420p")
-
+        self.args = args
         ###
         
         self.b_print_debug = False
@@ -59,7 +60,7 @@ class HLSEncoder:
 
         self.decode_audio_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_audio_mpv_ipc_pipe___{pipe_id}'
         self.decode_video_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_video_mpv_ipc_pipe___{pipe_id}'
-        self.encode_audio_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_encode_video_mpv_ipc_pipe___{pipe_id}'
+        self.encode_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_encode_mpv_ipc_pipe___{pipe_id}'
         self.interpolate_ipc_control_pipe = f"\\\\.\\pipe\\iw3_rife_output_ipc_pipe___{pipe_id}"
 
         self.interpolate_output_pipe_name = f"\\\\.\\pipe\\iw3_rife_output_{pipe_id}"
@@ -85,14 +86,12 @@ class HLSEncoder:
             "mlrtScriptPath": "RIFE_PLAYER_MLRT_SCRIPT_PATH"
         }
         assert load_rife_config( getattr(args, "rife_config_path", r"C:\Users\%username%\source\repos vs\rifef_\rifef_\folders.ini"), self.interpolate_conf_map)
-        self.interpolation_multiplier = getattr(args, "interpolation_multiplier", 2)
+        self.interpolation_multiplier = getattr(args, "int_mult", 1)
         self.vsScriptPath = os.getenv("vsScriptPath")
         os.environ["RIFE_PLAYER_MULTIPLIER"] = str(self.interpolation_multiplier)
         os.environ["vs_output_pixel_format"] = self.output_pixel_format
-
-
-
-        
+        self.using_interpolator = args.output_mode == "hls_ffmpeg" and self.interpolation_multiplier > 1
+        self.vapoursynth_buffer_frames = (1,4)
         self.interpolate_started = Future()
         #####
         
@@ -105,7 +104,7 @@ class HLSEncoder:
         self.audio_bytes_per_sample_and_channel = self.audio_channels * self.audio_bytes_per_sample
         self.dec_accumulator = DecimalAccumulator(target=self.audio_bytes_per_sample_and_channel)
 
-        out_fps = self.fps * self.interpolation_multiplier if self.interpolation_multiplier > 1 else self.fps
+        out_fps = self.get_output_fps()# self.fps * self.interpolation_multiplier if self.interpolation_multiplier > 1 else self.fps
         samples_per_frame = self.audio_sample_rate / self.fps
         self.audio_bytes_per_frame = samples_per_frame * self.audio_channels * self.audio_bytes_per_sample
         # self.audio_dec, self.audio_int = math.modf(self.audio_bytes_per_frame)
@@ -120,12 +119,12 @@ class HLSEncoder:
         self.decode_audio_queue = queue.Queue(maxsize=round_fps)
         self.decode_video_queue = queue.Queue(maxsize=round_fps)
         self.encode_video_queue = queue.Queue(maxsize=10)
-        self.interpolate_output_queue = queue.Queue(maxsize=10)
+        # self.interpolate_output_queue = queue.Queue(maxsize=10)
         self.interpolate_input_queue =  queue.Queue(maxsize=10)
         
         self.audio_buffer = ThreadSafeByteFIFO()
 
-        self.video_frame_size = self.width*self.height*3
+        self.rgb_video_frame_size = self.width*self.height*3
         self.audio_thread = threading.Thread(target=lambda: 1)
         self.video_thread = threading.Thread(target=lambda: 1)
         self.interpolate_thread = threading.Thread(target=lambda: 1)
@@ -160,7 +159,6 @@ class HLSEncoder:
 
         self.running = False
 
-        self.args = args
         if args.device.type == "cuda":
             self.cuda_stream = torch.cuda.Stream(device=args.device)
         else:
@@ -177,12 +175,12 @@ class HLSEncoder:
             perc = (x / notepad_hwnd.width)*100
             seek_absolute_perc(perc, self.mpv_ipc_control_pipe)
 
-        self.handler = WindowClickHandler()
+        # self.handler = WindowClickHandler()
 
-        notepad_hwnd :gw.Window = find_window_by_title("Notepad++")
-        if not notepad_hwnd:
-            print("Notepad++ window not found!")
-            exit()
+        # notepad_hwnd :gw.Window = find_window_by_title("Notepad++")
+        # if not notepad_hwnd:
+        #     print("Notepad++ window not found!")
+        #     exit()
 
         # self.handler.set_click_callback(notepad_hwnd, my_click_callback)
 
@@ -206,13 +204,19 @@ class HLSEncoder:
                 self.seek_perc_at_keyframe(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
-        threading.Thread(target=test, daemon=True).start()
+        #threading.Thread(target=test, daemon=True).start()
         httpd = start_http_server(self.output_dir, self)
+        
+    def get_output_fps(self):
+        if self.using_interpolator:
+            return self.fps * self.interpolation_multiplier 
+        else:
+            return self.fps
 
     def print_debug(self):
-        str_ =  f"q->  da: {self.decode_audio_queue.qsize()} dv: {self.decode_video_queue.qsize()} "
-        str_ += f"ii: {self.interpolate_input_queue.qsize()} io: {self.interpolate_output_queue.qsize()} "
-        str_ += f"ev: {self.encode_video_queue.qsize()} "
+        str_ =  f"q->  da: {self.decode_audio_queue.qsize():3d} dv: {self.decode_video_queue.qsize():3d} "
+        str_ += f"ii: {self.interpolate_input_queue.qsize():3d} ev: {self.encode_video_queue.qsize():3d} "
+        # str_ += f"ev: {self.encode_video_queue.qsize()} "
         str_ += f"| v: {self.decoded_video_frames_n} a: {self.decoded_audio_frames_n} | "
         self.c.tick(str_)
 
@@ -362,7 +366,7 @@ class HLSEncoder:
         
     def quit_encode_mpv(self):
 
-        res = send_cmd({  "command": ["quit" ]  }, self.encode_audio_mpv_ipc_pipe_name )
+        res = send_cmd({  "command": ["quit" ]  }, self.encode_mpv_ipc_pipe_name )
         time.sleep(.1)
         def close_stdin():
             try:
@@ -402,8 +406,8 @@ class HLSEncoder:
             except:
                 pass
         
-        while not self.interpolate_output_queue.empty():
-            try:  self.interpolate_output_queue.get_nowait()
+        while not self.encode_video_queue.empty():
+            try:  self.encode_video_queue.get_nowait()
             except queue.Empty:  break
             
         if self.interpolate_thread.is_alive():
@@ -505,14 +509,14 @@ class HLSEncoder:
                 video_args,
                 stdout=subprocess.PIPE,
                 # stderr=subprocess.PIPE,
-                bufsize=self.video_frame_size
+                bufsize=self.rgb_video_frame_size
             )
             print("Video MPV instance started successfully!")
             
             while True:
                 while self.is_paused:
                     time.sleep(0.1)
-                data = read_frame_of_size(self.decode_video_mpv_proc.stdout, self.video_frame_size, self.video_frame_size )
+                data = read_frame_of_size(self.decode_video_mpv_proc.stdout, self.rgb_video_frame_size, self.rgb_video_frame_size )
                 if not data:
                     print("No data from mpv video decoder, end of file?")
                     break
@@ -559,133 +563,176 @@ class HLSEncoder:
 
     def get_encoder_cmd(self, out_width):
 
-        out_fps = self.fps * self.interpolation_multiplier if self.interpolation_multiplier > 1 else self.fps
+        out_fps = self.get_output_fps()# self.fps * self.interpolation_multiplier if self.interpolation_multiplier > 1 else self.fps
         playlist_path = os.path.join(self.output_dir, 'playlist.m3u8')
         segment_pattern_path = os.path.join(self.output_dir, 'segment_%03d.ts')
             
         codec = self.args.video_codec
-
-        output_hls = True
         
-        if self.use_ffmpeg_encoder:
-            buf_settings = [
-                 "-probesize", "1KB", #"-thread_queue_size", "500000",# "-rtbufsize", "20000000"
-            ]
-                        
-            ofopts = ''
-            if not "nvenc" in codec:
-                video_opts = [
-                    "-preset", self.args.preset,
-                    "-b:v", self.args.video_bitrate
-                ]
-                ofopts = ["-movflags", "+frag_keyframe+empty_moov"]
-            else:
-                video_opts = [
-                    "-preset", self.args.nvenc_preset,
-                    "-rc", "vbr",
-                    "-cq", "18",
-                    "-b:v", "0",
-                    "-bufsize", "20M",
-                    "-profile", "high"
-                ]
 
-            if output_hls:
-                hls_opts = [
-                    "-f", "hls",
-                    "-hls_time", str(self.ff_hls_time),
-                    "-hls_list_size", str(self.ff_hls_list_size),
-                    "-hls_flags", "independent_segments+append_list",
-                    "-hls_segment_type", "mpegts",
-                    "-hls_segment_filename", segment_pattern_path,
-                    "-hls_playlist_type", "event"
-                ]
-            else:
-                hls_opts = ["-f", "mp4"]
+        if self.args.output_mode == "local_mpv":
+            buffer_frames = ":".join([str(e) for e in self.vapoursynth_buffer_frames])
 
+            fmt_arg = f"format={self.output_pixel_format}"
+            rife_arg = [f'--vf=vapoursynth=[{self.vsScriptPath}]:{buffer_frames},{fmt_arg}'] if self.interpolation_multiplier > 1 else [f"--vf={fmt_arg}"]
             cmd = [
-                "ffmpeg",
-                *buf_settings,
-                "-i", self.encode_mpv_pipe_name,  # External audio file
-                "-f", "rawvideo",
-                "-pixel_format", self.output_pixel_format if self.interpolation_multiplier  > 1 else "bgr24",
-                "-video_size", f"{out_width}x{self.height}",
-                "-framerate", str(out_fps),
-                # "-thread_queue_size", "50000",
-                "-i", "-", 
-                "-map", "0:a:0", 
-                "-map", "1:v:0", 
-                "-c:v", self.args.video_codec,
-                "-pix_fmt", "yuv420p",  #important, otherwise will encode in unsupported pi
-                *video_opts,
-                "-g", f"{out_fps*self.ff_hls_time}",
-                "-keyint_min", f"{out_fps*self.ff_hls_time}",
-                "-r", str(out_fps),  # Output framerate
-                "-c:a", "aac",  # Audio codec (adjust as needed)
-                *hls_opts,
-                *ofopts,
-                "-y",  # Overwrite output file
-                playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
-                "-loglevel",  self.mpv_log_levels['encode']
+                self.mpv_bin,
+                "-",
+                f"--cache-secs=2", "--cache=yes",
+                # r'd:\1.mkv',  
+                "--hwdec=auto-copy",
+                "--hwdec-codecs=all",
+                "--vo=gpu-next",
+                "--profile=fast",
+                # "--video-sync=desync",
+                '--no-config', # Ignore user configurations for predictable behavior in scripts
+                # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
+                '--demuxer=rawvideo',
+                f'--demuxer-rawvideo-w={out_width}',
+                f'--demuxer-rawvideo-h={self.height}',
+                '--demuxer-rawvideo-mp-format=bgr24',
+                f'--demuxer-rawvideo-fps={out_fps}',
+                "--aid=1",
+                f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
+                *rife_arg,#,format={self.output_pixel_format}',
+                #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
+                #  "--of=mp4",
+                #  "--o=test.mp4",
+                # '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
+                # f'--ovc={self.args.video_codec}',
+                # f'--ovcopts={ovcopts}', # Options for the video codec
+                # f"--of={'hls' if output_hls else 'mp4'}",
+                # f"--vf=format=fmt=yuv420p",  #important 
+                # f"--vf=fps={out_fps}",
+                # f'--ofopts={ofopts}', # Output format options
+                '--input-ipc-server=' + self.encode_mpv_ipc_pipe_name,
+                f"--msg-level=all={self.mpv_log_levels['encode']}",
             ]
-
-            # Remove empty strings if any
-            cmd = [arg for arg in cmd if arg]
+            return cmd
         else:
-            ofopts = f''
-            if not "nvenc" in codec:
-                ovcopts=f"preset={ self.args.preset},b={self.args.video_bitrate}"
-                ofopts =  f'movflags=+frag_keyframe+empty_moov'
-            else:
-                ovcopts= ",".join([
-                        f"preset={ self.args.nvenc_preset}",
-                        "rc=vbr",
-                        "cq=18",           # Direct quality control (18 is very high quality)
-                        "b=0",           # Required for -cq mode
-                        #"maxrate=10M",     # Optional safety net: max bitrate
-                        "bufsize=20M",     # Buffer size (2x maxrate)
-                        "profile=high"
-                    ])
-            ofopts = ",".join([
-                        # '-f', 'hls',
-                        # f"r={out_fps}",
-                        f'hls_time={self.ff_hls_time}',
-                        f'hls_list_size={self.ff_hls_list_size}',
-                        f'hls_flags=independent_segments+append_list',
-                        # f'hls_flags=single_file',
-                        f'hls_segment_type=mpegts',
-                        f'hls_segment_filename={segment_pattern_path}',
-                        f'hls_playlist_type=event',
-                    ])
                 
-            cmd = [
-                    self.mpv_bin,
-                    "-",
-                    f"--cache-secs=2", "--cache=yes",
-                    # r'd:\1.mkv',  
-                    '--no-config', # Ignore user configurations for predictable behavior in scripts
-                    # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
-                    '--demuxer=rawvideo',
-                    f'--demuxer-rawvideo-w={out_width}',
-                    f'--demuxer-rawvideo-h={self.height}',
-                    '--demuxer-rawvideo-mp-format=bgr24',
-                    f'--demuxer-rawvideo-fps={out_fps}',
-                    "--aid=2",
-                    f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
-                    #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
-                    #  "--of=dash",
-                    '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
-                    f'--ovc={self.args.video_codec}',
-                    f'--ovcopts={ovcopts}', # Options for the video codec
-                    f"--of={'hls' if output_hls else 'mp4'}",
-                    f"--vf=format=fmt=yuv420p",  #important 
-                    f"--vf=fps={out_fps}",
-                    f'--ofopts={ofopts}', # Output format options
-                    '--input-ipc-server=' + self.encode_audio_mpv_ipc_pipe_name,
-                    f"--msg-level=all={self.mpv_log_levels['encode']}",
+
+            output_hls = True
+            
+            if self.use_ffmpeg_encoder:
+                buf_settings = [
+                    "-probesize", "1KB", #"-thread_queue_size", "500000",# "-rtbufsize", "20000000"
                 ]
-            cmd_ = " ".join(cmd)
-            print("\ncmd", cmd_, "\n")
-        return cmd
+                            
+                ofopts = ''
+                if not "nvenc" in codec:
+                    video_opts = [
+                        "-preset", self.args.preset,
+                        "-b:v", self.args.video_bitrate
+                    ]
+                    ofopts = ["-movflags", "+frag_keyframe+empty_moov"]
+                else:
+                    video_opts = [
+                        "-preset", self.args.nvenc_preset,
+                        "-rc", "vbr",
+                        "-cq", "18",
+                        "-b:v", "0",
+                        "-bufsize", "20M",
+                        "-profile", "high"
+                    ]
+
+                if output_hls:
+                    hls_opts = [
+                        "-f", "hls",
+                        "-hls_time", str(self.ff_hls_time),
+                        "-hls_list_size", str(self.ff_hls_list_size),
+                        "-hls_flags", "independent_segments+append_list",
+                        "-hls_segment_type", "mpegts",
+                        "-hls_segment_filename", segment_pattern_path,
+                        "-hls_playlist_type", "event"
+                    ]
+                else:
+                    hls_opts = ["-f", "mp4"]
+
+                cmd = [
+                    "ffmpeg",
+                    *buf_settings,
+                    "-i", self.encode_mpv_pipe_name,  # External audio file
+                    "-f", "rawvideo",
+                    "-pixel_format", self.output_pixel_format if self.using_interpolator else "bgr24",
+                    "-video_size", f"{out_width}x{self.height}",
+                    "-framerate", str(out_fps),
+                    # "-thread_queue_size", "50000",
+                    "-i", "-", 
+                    "-map", "0:a:0", 
+                    "-map", "1:v:0", 
+                    "-c:v", self.args.video_codec,
+                    "-pix_fmt", "yuv420p",  #important, otherwise will encode in unsupported pi
+                    *video_opts,
+                    "-g", f"{out_fps*self.ff_hls_time}",
+                    "-keyint_min", f"{out_fps*self.ff_hls_time}",
+                    "-r", str(out_fps),  # Output framerate
+                    "-c:a", "aac",  # Audio codec (adjust as needed)
+                    *hls_opts,
+                    *ofopts,
+                    "-y",  # Overwrite output file
+                    playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
+                    "-loglevel",  self.mpv_log_levels['encode']
+                ]
+
+                # Remove empty strings if any
+                cmd = [arg for arg in cmd if arg]
+            else:
+                ofopts = f''
+                if not "nvenc" in codec:
+                    ovcopts=f"preset={ self.args.preset},b={self.args.video_bitrate}"
+                    ofopts =  f'movflags=+frag_keyframe+empty_moov'
+                else:
+                    ovcopts= ",".join([
+                            f"preset={ self.args.nvenc_preset}",
+                            "rc=vbr",
+                            "cq=18",           # Direct quality control (18 is very high quality)
+                            "b=0",           # Required for -cq mode
+                            #"maxrate=10M",     # Optional safety net: max bitrate
+                            "bufsize=20M",     # Buffer size (2x maxrate)
+                            "profile=high"
+                        ])
+                ofopts = ",".join([
+                            # '-f', 'hls',
+                            # f"r={out_fps}",
+                            f'hls_time={self.ff_hls_time}',
+                            f'hls_list_size={self.ff_hls_list_size}',
+                            f'hls_flags=independent_segments+append_list',
+                            # f'hls_flags=single_file',
+                            f'hls_segment_type=mpegts',
+                            f'hls_segment_filename={segment_pattern_path}',
+                            f'hls_playlist_type=event',
+                        ])
+                    
+                cmd = [
+                        self.mpv_bin,
+                        "-",
+                        f"--cache-secs=2", "--cache=yes",
+                        # r'd:\1.mkv',  
+                        '--no-config', # Ignore user configurations for predictable behavior in scripts
+                        # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
+                        '--demuxer=rawvideo',
+                        f'--demuxer-rawvideo-w={out_width}',
+                        f'--demuxer-rawvideo-h={self.height}',
+                        '--demuxer-rawvideo-mp-format=bgr24',
+                        f'--demuxer-rawvideo-fps={out_fps}',
+                        "--aid=2",
+                        f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
+                        #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
+                        #  "--of=dash",
+                        '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
+                        f'--ovc={self.args.video_codec}',
+                        f'--ovcopts={ovcopts}', # Options for the video codec
+                        f"--of={'hls' if output_hls else 'mp4'}",
+                        f"--vf=format=fmt=yuv420p",  #important 
+                        f"--vf=fps={out_fps}",
+                        f'--ofopts={ofopts}', # Output format options
+                        '--input-ipc-server=' + self.encode_mpv_ipc_pipe_name,
+                        f"--msg-level=all={self.mpv_log_levels['encode']}",
+                    ]
+                cmd_ = " ".join(cmd)
+                print("\ncmd", cmd_, "\n")
+            return cmd
 
     def interpolator_feeder(self):
         while 1:
@@ -697,10 +744,10 @@ class HLSEncoder:
         
         out_width = self.get_output_width(self.width)
         
-        self.frame_size = int(out_width * self.height * 1.5) if self.output_pixel_format == "yuv420p" else out_width * self.height * 3
+        int_frame_size = int(out_width * self.height * 1.5) if self.output_pixel_format == "yuv420p" else out_width * self.height * 3
 
         try:
-            pipe_size = self.frame_size# 1024*1024*1
+            pipe_size = int_frame_size# 1024*1024*1
             self.interpolate_output_pipe_handle = win32pipe.CreateNamedPipe(
                 self.interpolate_output_pipe_name,
                 win32pipe.PIPE_ACCESS_INBOUND,
@@ -712,7 +759,7 @@ class HLSEncoder:
         except Exception as e:
             print(f"Error creating Windows named pipe: {e}")
         
-        
+        buffer_frames = ":".join([str(e) for e in self.vapoursynth_buffer_frames])
         cmd = [
             self.mpv_bin,
             '-',  # Read from stdin
@@ -724,12 +771,12 @@ class HLSEncoder:
             f'--demuxer-rawvideo-h={self.height}',
             '--demuxer-rawvideo-mp-format=bgr24',
             # f'--demuxer-rawvideo-fps={self.fps}',
-            f'--vf=vapoursynth=[{self.vsScriptPath}]:1:4,format={self.output_pixel_format}',
+            f'--vf=vapoursynth=[{self.vsScriptPath}]:{buffer_frames},format={self.output_pixel_format}',
             '--of=rawvideo',  # Output raw video
             '--ovc=rawvideo',  # Raw video codec
             f'--o={self.interpolate_output_pipe_name}',  # Write to named pipe
-            "--vo=no",
-            "--ao=no",
+            # "--vo=no",
+            # "--ao=no",
             f"--input-ipc-server={self.interpolate_ipc_control_pipe}",
             f"--msg-level=all={self.mpv_log_levels['interpolate']}"
         ]
@@ -748,8 +795,8 @@ class HLSEncoder:
             while self.running:
                 try:
                     # Read processed frame from pipe
-                    processed_data = read_frame_of_size(self.interpolate_output_pipe_handle, self.frame_size, self.frame_size)
-                    self.interpolate_output_queue.put(processed_data)
+                    processed_data = read_frame_of_size(self.interpolate_output_pipe_handle, int_frame_size, int_frame_size)
+                    self.encode_video_queue.put(processed_data)
                     # result, processed_data = win32file.ReadFile(self.output_pipe_handle, self.frame_size)
                     continue
                     
@@ -794,9 +841,15 @@ class HLSEncoder:
                 
     def encoder(self):
         print("Encoder started")
-
+        out_width = self.get_output_width(self.width)
+        out_fps = self.get_output_fps()
         out_audio_pipe_size = self.audio_bytes_per_second*3 if self.use_ffmpeg_encoder else 1024*1024*1
-
+        if self.using_interpolator:
+            out_frame_size = int(out_width * self.height * 1.5) if self.output_pixel_format == "yuv420p" else out_width * self.height * 3
+        else:
+            out_frame_size = out_width * self.height * 3
+        print("Encoder out frame size" , out_frame_size)
+        
         self.pipe = win32pipe.CreateNamedPipe(
             self.encode_mpv_pipe_name,
             win32pipe.PIPE_ACCESS_DUPLEX,
@@ -808,15 +861,16 @@ class HLSEncoder:
         
 
         try:
-            out_width = self.get_output_width(self.width)
 
             cmd = self.get_encoder_cmd(out_width)
             
             # time.sleep(2)
-            bufsize = self.video_frame_size*3 if self.use_ffmpeg_encoder else 1024*1024 #1920*1080 half sbs 48 fps
+            bufsize = out_frame_size*3 if self.use_ffmpeg_encoder else 1024*1024 #1920*1080 half sbs 48 fps
+            #maybe bufsize should be out_frame_size * framerate
+            # bufsize = int(out_frame_size  * round(out_fps))
             self.encode_process = subprocess.Popen( cmd, stdin=subprocess.PIPE,
                                                     bufsize= bufsize
-                                                   )#self.video_frame_size*3 for interpolation x2
+                                                   )#out_frame_size*3 for interpolation x2
             
             win32pipe.ConnectNamedPipe(self.pipe, None)
             print("Pipe connected")
@@ -838,16 +892,16 @@ class HLSEncoder:
                 audio_written_bytes = win32file.WriteFile(self.pipe, audio_data)[1]
                 return audio_written_bytes
 
-            from collections import deque
             dummy_audio_data = ThreadSafeByteFIFO()
             dummy_audio_data.put(create_sine_wave_bytes(self.audio_bytes_per_second*3, self.audio_sample_rate))
 
             frames_written = 0
-            ss = int(self.audio_bytes_per_second*(1.5/self.interpolation_multiplier))
+            ss =  int(self.audio_bytes_per_second*(1.5/(self.interpolation_multiplier if self.using_interpolator else 1))) 
+            # ss = int(self.audio_bytes_per_second*1.8 )
             while tot_audio_bytes_wr < ss:
                 wr  = write_audio(dummy_audio_data)
                 tot_audio_bytes_wr+=wr
-                # print("dummy a", wr)
+                # print("dummy a", wr, frames_written)
                 frames_written+=1
 
             # remainder = tot_wr % self.audio_bytes_per_sample_and_channel
@@ -857,18 +911,19 @@ class HLSEncoder:
             #     tot_wr += win32file.WriteFile(self.pipe, bytearray(needed))[1]
             assert tot_audio_bytes_wr % 4 == 0
 
-            dummy_image = bytearray([128, 128, 128] * out_width * self.height)
+            dummy_image = bytearray([128] * out_frame_size)
 
-            for x in range(frames_written):
+            dummy_frames_number  = frames_written*(self.interpolation_multiplier if self.using_interpolator else 1)
+            for x in range(dummy_frames_number):
                 ret = self.encode_process.stdin.write(dummy_image)
-                print(f"{x} dummy v", ret)
+                # print(f"{x} dummy v", ret)
             print("Encoder started")
 
             # de = deque(maxlen=150)
             fn = 0
             while not self.__stop_all:  
-                if self.interpolation_multiplier > 1:
-                    bgr24_data = self.interpolate_output_queue.get()
+                if self.using_interpolator:
+                    bgr24_data = self.encode_video_queue.get()
                 else:
                     sbs = self.encode_video_queue.get()
                     bgr24_data = self.tensor_to_bgr_data(sbs)
@@ -882,11 +937,12 @@ class HLSEncoder:
                     written = self.encode_process.stdin.write(remaining_data)
                     bytes_written += written
                     
-                fn += 1
-                if fn % 2 == 0:
+                if not self.using_interpolator or fn % self.interpolation_multiplier == 0:
                     audio_frame = self.decode_audio_queue.get()
                     audio_bytes_written = win32file.WriteFile(self.pipe, audio_frame)[1]
                     assert len(audio_frame) == audio_bytes_written
+                fn += 1
+
                 # de.append(audio_bytes_written)
                 # print("dea", np.mean(de), self.audio_bytes_per_frame)
                 
@@ -935,7 +991,7 @@ class HLSEncoder:
     def start(self):
         self.audio_thread = threading.Thread(target=self.audio_decoder, daemon=True)
         self.video_thread = threading.Thread(target=self.video_decoder, daemon=True)
-        if self.interpolation_multiplier > 1:
+        if  self.using_interpolator:
             self.interpolator_feeder_thread = threading.Thread(target=self.interpolator_feeder, daemon=True)
             self.interpolate_thread = threading.Thread(target=self.interpolator, daemon=True)
         self.encode_thread = threading.Thread(target=self.encoder, daemon=True)
@@ -943,43 +999,59 @@ class HLSEncoder:
         
         self.audio_thread.start()
         self.video_thread.start()
-        if self.interpolation_multiplier > 1:
+        if self.using_interpolator:
             self.interpolator_feeder_thread.start()
             self.interpolate_thread.start()
             self.interpolate_started.result()
         self.encode_thread.start()
         self.segment_thread.start()
 
+import os
+from http.server import SimpleHTTPRequestHandler, HTTPServer
+import threading
+
 class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         print(f"Requested file: {self.path}")  # Log the requested path
-        self.vp : HLSEncoder = self.vp
-
-        # If root path is requested, serve master.m3u8 instead
-        if self.path == '/' or self.path == '/index.html':
-            self.path = os.path.join(self.vp.output_dir ,'/master.m3u8')
         
+        # If root path is requested, serve index.html instead of master.m3u8
+        if self.path == '/' or self.path == '/index.html':
+            self.path = '/index.html'  # This will serve index.html from the output_dir
+        
+        # Handle .ts files
         if self.path.endswith(".ts") and hasattr(self, "vp"):
             self.vp.last_req_seg_n = extract_n(self.path) or 0
 
         super().do_GET()
 
+    def end_headers(self):
+        # Add CORS headers if needed
+        self.send_header('Access-Control-Allow-Origin', '*')
+        super().end_headers()
+
 def start_http_server(output_dir, vp):
     # Change to the output directory so the server serves from there
+    import sys
+    os.__file__
+    try:
+        
+        shutil.copy(os.path.join( os.path.dirname(os.path.abspath(__file__)),"index.html"), output_dir)
+    except Exception as e:
+        print("Error copying index", e)
     os.chdir(output_dir)
 
     # Start HTTP server in a separate thread
     server_address = ('0.0.0.0', vp.args.port)
 
     handler = LoggingHTTPRequestHandler
-    handler.vp  = vp
+    handler.vp = vp
 
     httpd = HTTPServer(server_address, handler)  # Use our custom handler
     
     def run_server():
-        print(f"Serving HLS stream at http://localhost:{vp.args.port}/master.m3u8")
-        print(f"Root path (/) will automatically serve master.m3u8")
+        print(f"Serving HLS stream at http://localhost:{vp.args.port}/")
+        print(f"Make sure you have an index.html file in {output_dir}")
         httpd.serve_forever()
 
     thread = threading.Thread(target=run_server, daemon=True)

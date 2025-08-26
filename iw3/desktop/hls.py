@@ -72,11 +72,10 @@ def iw3_desktop_main_hls(args):
                 side_model = compile_model(side_model)
         count = 0
 
-        output_queue = vp.interpolate_input_queue if vp.interpolation_multiplier > 1 else vp.encode_video_queue
+        output_queue = vp.interpolate_input_queue if  vp.using_interpolator else vp.encode_video_queue
         while True:
             with args.state["args_lock"]:
                 
-
                 frame =  vp.decode_video_queue.get()
 
                 if type(frame) != torch.Tensor and not frame:
@@ -349,6 +348,16 @@ def create_parser():
     parser.add_argument("--segment_folder", type=str, help="output for the video segment files ", default="hls_out")
     parser.add_argument("--nvenc-preset", type=str, help="nvenc preset", default="p1")
     parser.add_argument("--cli-mode", type=int, help="cli mode", default=False)
+    parser.add_argument("--int-mult", type=int, help="RIFE interpolation multiplier, 2 means twice the framerate", default=1)
+    parser.add_argument("--output-mode", type=str,
+                        help="local_mpv plays the output with mpv in the pc's screen, this is for use with Virtual Desktop, hls_ffmpeg streams the output in hls format with ffmpeg",
+                        default="local_mpv", choices=['local_mpv', 'hls_ffmpeg'])
+    parser.add_argument("--output-pix-fmt", type=str, help="output pixel format", default="yuv420p")
+    parser.add_argument('--input_res_scale', 
+                   type=float,
+                   choices=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+                   help='Choose from 0.5, 0.6, 0.7, 0.8, 0.9, or 1.0')
+    ######## to avoid mpv dropping the gpu frequency set mpv and python binaries to prefer maximum performance in nvidia control panel
 
 
     parser.set_defaults(
