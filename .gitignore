@@ -212,3 +212,4 @@ cython_debug/
 /hls_out
 *.wav
 test.mkv
+profiles.json

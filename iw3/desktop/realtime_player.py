@@ -1,5 +1,6 @@
 
 import os
+import sys
 import time
 from .utils import (
     init_win32,
@@ -17,7 +18,7 @@ from nunif.device import create_device
 from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
-from .decode_encode import HLSEncoder
+from .realtime_player_process import HLSEncoder
 from performanceTimer import Counter
 
 TORCH_VERSION = Version(torch.__version__)
@@ -28,8 +29,8 @@ from .utils import init_num_threads, get_local_address, is_private_address
 
 
 def iw3_desktop_main_hls(args):
-    if not path.isfile(args.input_file):
-        print("File not found", args.input_file)
+    if not args.input_file or  not path.isfile(args.input_file):
+        print("File not found:", args.input_file)
         exit()
     init_num_threads(args.gpu[0])
     c = Counter()
@@ -65,6 +66,15 @@ def iw3_desktop_main_hls(args):
     vp = HLSEncoder(args.input_file, args.segment_folder, args=args)
     vp.start()
     
+    def loop():
+        print("Waiting for input...")
+        line = sys.stdin.readline()
+        print(f"Received: {line.strip()}")
+        if "___exit___" in line:
+            vp.stop_all()
+    
+    threading.Thread(target=loop, daemon=True).start()
+    
     try:
         if args.compile:
             depth_model.compile()
@@ -73,7 +83,8 @@ def iw3_desktop_main_hls(args):
         count = 0
 
         output_queue = vp.interpolate_input_queue if  vp.using_interpolator else vp.encode_video_queue
-        while True:
+        
+        while not vp.has_stopped():
             with args.state["args_lock"]:
                 
                 frame =  vp.decode_video_queue.get()
@@ -320,23 +331,7 @@ class SeekBarApp:
         self.stop_button.config(state=tk.DISABLED)
         self.status_label.config(text="Ready")
 
-def main():
-    root = tk.Tk()
-    theme_path= r"F:\all\GitHub\Azure-ttk-theme\azure.tcl"
-    if os.path.isfile(theme_path):
-        root.tk.call('source', theme_path)
-        root.tk.call("set_theme", "dark")
-    app = SeekBarApp(root)
-    
-    root.mainloop()
 
-# if __name__ == "__main__":
-#     main()
-
-# from gooey import Gooey
-# import argparse
-
-# @Gooey  # ← Just add this decorator
 def create_parser():
 
     parser = IW3U.create_parser(required_true=False)
@@ -353,10 +348,10 @@ def create_parser():
                         help="local_mpv plays the output with mpv in the pc's screen, this is for use with Virtual Desktop, hls_ffmpeg streams the output in hls format with ffmpeg",
                         default="local_mpv", choices=['local_mpv', 'hls_ffmpeg'])
     parser.add_argument("--output-pix-fmt", type=str, help="output pixel format", default="yuv420p")
-    parser.add_argument('--input_res_scale', 
-                   type=float,
-                   choices=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
-                   help='Choose from 0.5, 0.6, 0.7, 0.8, 0.9, or 1.0')
+    # parser.add_argument('--input_res_scale', 
+    #                type=float,
+    #                choices=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    #                help='Choose from 0.5, 0.6, 0.7, 0.8, 0.9, or 1.0')
     ######## to avoid mpv dropping the gpu frequency set mpv and python binaries to prefer maximum performance in nvidia control panel
 
 

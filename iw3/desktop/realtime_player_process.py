@@ -30,7 +30,7 @@ import keyboard
 
 import time, shutil
 
-from .decode_encode_utils import *
+from .realtime_player_utils import *
 from global_hotkeys import register_hotkeys, start_checking_hotkeys
 
 
@@ -118,7 +118,7 @@ class HLSEncoder:
         # audio_buffer_frames_n = self.audio_sample_rate / round_fps
         self.decode_audio_queue = queue.Queue(maxsize=round_fps)
         self.decode_video_queue = queue.Queue(maxsize=round_fps)
-        self.encode_video_queue = queue.Queue(maxsize=10)
+        self.encode_video_queue = queue.Queue(maxsize=10) #1 because otherwise interpolation will cause audio shift 
         # self.interpolate_output_queue = queue.Queue(maxsize=10)
         self.interpolate_input_queue =  queue.Queue(maxsize=10)
         
@@ -190,7 +190,7 @@ class HLSEncoder:
 
         bindings = [["window + f2", None, lambda:self.seek_perc_at_keyframe(get_number()), False],
                     ["window + f11", None, toggle_print_debug, False],
-                    ["window + f12", None, self.quit_encode_mpv, False]
+                    ["window + f12", None, self.stop_all, False]
                     ]
         register_hotkeys(bindings)
         start_checking_hotkeys()
@@ -212,7 +212,8 @@ class HLSEncoder:
             return self.fps * self.interpolation_multiplier 
         else:
             return self.fps
-
+    def has_stopped(self): return self.__stop_all
+    
     def print_debug(self):
         str_ =  f"q->  da: {self.decode_audio_queue.qsize():3d} dv: {self.decode_video_queue.qsize():3d} "
         str_ += f"ii: {self.interpolate_input_queue.qsize():3d} ev: {self.encode_video_queue.qsize():3d} "
@@ -242,9 +243,6 @@ class HLSEncoder:
     def get_last_peek_sizes(self):
         return {e: self.last_peeked_pipe_sizes[getattr(self, e)]/(1000*1000) for e in ["audio_pipe", "video_pipe", "out_audio_pipe", "out_video_pipe"]}
 
-    def deinit(self):
-        self.handler.remove_click_callback()
-        print("Listener stopped.")
 
     def init_dir(self):
         def try_del():
@@ -300,16 +298,16 @@ class HLSEncoder:
         self.quit_video_decode_mpv()
         self.quit_encode_mpv()
         self.stop_interpolator()
-        print("Joining encode thread")
-        self.encode_thread.join()
-        print("Joining audio decode thread")
-        self.audio_thread.join()
-        print("Joining video decode thread")
-        self.video_thread.join()
-        print("Joining interpolate thread")
-        self.interpolate_thread.join()
-        print("Joining segment check thread")
-        self.segment_thread.join()
+
+        for qq in [self.decode_audio_queue, self.decode_video_queue, self.encode_video_queue, self.interpolate_input_queue]:
+            while qq.qsize(): qq.get()
+        
+        for t_name in ["encode_thread", "audio_thread","video_thread", "interpolate_thread", "segment_thread"]:
+            thread_ : threading.Thread = getattr(self, t_name)
+            if thread_.is_alive():
+                print(f"Joining {t_name} ")
+                thread_.join()
+        print("---> Everthing stopped")
         
 
     def __seek(self, time_):
@@ -369,9 +367,7 @@ class HLSEncoder:
         res = send_cmd({  "command": ["quit" ]  }, self.encode_mpv_ipc_pipe_name )
         time.sleep(.1)
         def close_stdin():
-            try:
-                self.encode_process.stdin.close()
-                time.sleep(.1)
+            try:  self.encode_process.stdin.close()
             except Exception as e:print("Error closing encode stdin handle", e)
         def close_pipe():
             try: win32file.CloseHandle(self.pipe)
@@ -386,16 +382,23 @@ class HLSEncoder:
         
     def stop_interpolator(self):
         send_cmd({  "command": ["quit" ]  }, self.interpolate_ipc_control_pipe )
-
+        self.interpolate_input_queue.put(None)
         if self.interpolate_process:
             try:
-                try:  win32file.CloseHandle(self.interpolate_output_pipe_handle)
-                except Exception as e :print("Error closing rife output handle")
+                def close_stdin():
+                    try: self.interpolate_process.stdin.close()
+                    except Exception as e:print("Error closing encode stdin handle", e)
+                def close_pipe():
+                    try: win32file.CloseHandle(self.interpolate_output_pipe_handle)
+                    except Exception as e:print("errror", e)
+                    
+                threading.Timer(.1, close_stdin ).start()
+                t = threading.Timer(.2, close_pipe )
+                t.start()
+                t.join()
+
                 
-                if self.interpolate_process.stdin:
-                    self.interpolate_process.stdin.close()
-                
-                self.interpolate_process.terminate()
+                # self.interpolate_process.terminate()
                 for _ in range(10):  
                     if self.interpolate_process.poll() is not None:
                         break
@@ -459,7 +462,7 @@ class HLSEncoder:
             )
             print("Audio MPV instance started successfully!")
 
-            while True:
+            while not self.__stop_all:
                 self.sync_queue.get()
                 emission, current_total = self.dec_accumulator.add_number(self.audio_dec)
                 audio_s = self.audio_int+(emission)
@@ -513,7 +516,7 @@ class HLSEncoder:
             )
             print("Video MPV instance started successfully!")
             
-            while True:
+            while not self.__stop_all:
                 while self.is_paused:
                     time.sleep(0.1)
                 data = read_frame_of_size(self.decode_video_mpv_proc.stdout, self.rgb_video_frame_size, self.rgb_video_frame_size )
@@ -540,26 +543,28 @@ class HLSEncoder:
                 self.decoded_video_frames_n.increment()
                 self.decode_video_queue.put(frame)
                 
-                de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
-                
-                self.sync_queue.put(1)
-                for x in range(1):     
-                    if de > 2 and self.sync_queue.qsize() < 3:
-                        self.sync_queue.put(1)
-                    #  if de > 2 and  time.time() - self.last_extra_audio_frame > 0.1:
-                    #     self.last_extra_audio_frame = time.time()
-                    #     for x in range(de+1):
-                    #         self.sync_queue.put(1)
-                        print("---- sync queue", self.sync_queue.qsize(), " ----")
-                # amount = self.interpolation_multiplier if self.interpolation_multiplier > 1 else 1
-                # if  1 or self.sync_queue.qsize() < 3:
-                # for x in range(de if de > 2 else 1):
-                #     self.sync_queue.put(1)
-                #     if x > 0:
-                #         print("sync queue", x," de:", de, "qs:",self.sync_queue.qsize(), " --")
+                # self.signal_audio_thread()
+
                 
         except Exception as e:
             print(f"Video read error: {e}")
+
+    def signal_audio_thread(self):
+        de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
+        self.sync_queue.put(1)
+        if de > 2 and self.sync_queue.qsize() < 3:
+            self.sync_queue.put(1)
+                #  if de > 2 and  time.time() - self.last_extra_audio_frame > 0.1:
+                #     self.last_extra_audio_frame = time.time()
+                #     for x in range(de+1):
+                #         self.sync_queue.put(1)
+            print("---- sync queue", self.sync_queue.qsize(), " ----")
+        # amount = self.interpolation_multiplier if self.interpolation_multiplier > 1 else 1
+        # if  1 or self.sync_queue.qsize() < 3:
+        # for x in range(de if de > 2 else 1):
+        #     self.sync_queue.put(1)
+        #     if x > 0:
+        #         print("sync queue", x," de:", de, "qs:",self.sync_queue.qsize(), " --")
 
     def get_encoder_cmd(self, out_width):
 
@@ -595,16 +600,7 @@ class HLSEncoder:
                 "--aid=1",
                 f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
                 *rife_arg,#,format={self.output_pixel_format}',
-                #  '--o=' + f"temp/stream.mpd", # Output file (implicitly overwrites)
-                #  "--of=mp4",
-                #  "--o=test.mp4",
-                # '--o=' + playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
-                # f'--ovc={self.args.video_codec}',
-                # f'--ovcopts={ovcopts}', # Options for the video codec
-                # f"--of={'hls' if output_hls else 'mp4'}",
-                # f"--vf=format=fmt=yuv420p",  #important 
-                # f"--vf=fps={out_fps}",
-                # f'--ofopts={ofopts}', # Output format options
+
                 '--input-ipc-server=' + self.encode_mpv_ipc_pipe_name,
                 f"--msg-level=all={self.mpv_log_levels['encode']}",
             ]
@@ -735,8 +731,9 @@ class HLSEncoder:
             return cmd
 
     def interpolator_feeder(self):
-        while 1:
+        while not self.__stop_all:
             sbs = self.interpolate_input_queue.get()
+            if type(sbs) != torch.Tensor :break
             bgr_data = self.tensor_to_bgr_data(sbs)
             self.interpolate_process.stdin.write(bgr_data)
             
@@ -858,26 +855,22 @@ class HLSEncoder:
         )
         print(f"Output audio named pipe created: {self.encode_mpv_pipe_name} with size {out_audio_pipe_size} ")
         
-        
-
         try:
 
             cmd = self.get_encoder_cmd(out_width)
             
-            # time.sleep(2)
             bufsize = out_frame_size*3 if self.use_ffmpeg_encoder else 1024*1024 #1920*1080 half sbs 48 fps
             #maybe bufsize should be out_frame_size * framerate
             # bufsize = int(out_frame_size  * round(out_fps))
             self.encode_process = subprocess.Popen( cmd, stdin=subprocess.PIPE,
-                                                    bufsize= bufsize
-                                                   )#out_frame_size*3 for interpolation x2
+                                                    bufsize= bufsize  )#out_frame_size*3 for interpolation x2
             
             win32pipe.ConnectNamedPipe(self.pipe, None)
             print("Pipe connected")
 
-            header = generate_wav_header( self.audio_sample_rate, self.audio_bits_per_sample,self.audio_channels, 0x1fffffff )
-            # with open("example.wav", "wb") as f:
-            #     f.write(header)
+            header = generate_wav_header( self.audio_sample_rate, self.audio_bits_per_sample,self.audio_channels, 
+                                         0x1fffffff)#   # 0x1fffffff otherwise it stops
+            # with open("example.wav", "wb") as f: f.write(header)
             
             win32file.WriteFile(self.pipe, header)
 
@@ -904,11 +897,6 @@ class HLSEncoder:
                 # print("dummy a", wr, frames_written)
                 frames_written+=1
 
-            # remainder = tot_wr % self.audio_bytes_per_sample_and_channel
-            # if remainder != 0:
-            #     needed = self.audio_bytes_per_sample_and_channel - remainder
-            #     f"{tot_wr} is not divisible by {self.audio_bytes_per_sample_and_channel}"
-            #     tot_wr += win32file.WriteFile(self.pipe, bytearray(needed))[1]
             assert tot_audio_bytes_wr % 4 == 0
 
             dummy_image = bytearray([128] * out_frame_size)
@@ -928,7 +916,7 @@ class HLSEncoder:
                     sbs = self.encode_video_queue.get()
                     bgr24_data = self.tensor_to_bgr_data(sbs)
                     # c.ct(1)
-
+                
                 bytes_written = 0
                 total_bytes = len(bgr24_data)
 
@@ -938,6 +926,7 @@ class HLSEncoder:
                     bytes_written += written
                     
                 if not self.using_interpolator or fn % self.interpolation_multiplier == 0:
+                    self.signal_audio_thread()
                     audio_frame = self.decode_audio_queue.get()
                     audio_bytes_written = win32file.WriteFile(self.pipe, audio_frame)[1]
                     assert len(audio_frame) == audio_bytes_written

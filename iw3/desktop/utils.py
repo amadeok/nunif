@@ -26,7 +26,7 @@ from nunif.device import create_device
 from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
-from .decode_encode import HLSEncoder
+from .realtime_player_process import HLSEncoder
 import numpy as np
 from performanceTimer import Counter
 
