@@ -1,8 +1,11 @@
 import configparser
 import os, win32file, threading, io , math, struct, subprocess, win32pipe, json
+import shutil
 from pynput import mouse
 import  win32gui, time, pygetwindow as gw, re
-
+import tempfile
+from urllib.parse import urlparse
+import yt_dlp
 
 class DecimalAccumulator:
     def __init__(self, target=4.0):
@@ -520,3 +523,101 @@ if __name__ == "__main__":
     path = "".join(sys.argv[1:])
     print("path", path)
     print(get_video_pixel_format_ffprobe(path))
+    
+    
+def is_url(string):
+    try:
+        result = urlparse(string)
+        return all([result.scheme, result.netloc])
+    except Exception:
+        return False
+    
+
+def download_url_to_temp(url, ytdlp_options, download=True, cleanup_on_failure=True):
+    temp_dir = os.path.join( tempfile.gettempdir(), "iw3_downloads")# mkdtemp()
+    
+    try:
+        ydl_opts = {
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': False,
+            'no_warnings': False,
+            'format': ytdlp_options,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=download)    
+            downloaded_file = ydl.prepare_filename(info)
+            return { 'success': True, 'file_path': downloaded_file, 'info': info }
+            
+    except Exception as e:
+        if cleanup_on_failure:
+            try:  shutil.rmtree(temp_dir)
+            except:   pass
+        return { 'success': False, 'file_path': None, 'error': str(e) }
+
+def get_formats(url):
+    with yt_dlp.YoutubeDL() as ydl:
+        info = ydl.extract_info(url, download=False)
+        return info
+
+def select_best_formats(formats, max_w=1920):
+    video_formats = []
+    audio_formats = []
+    
+    for f in formats:
+        if f.get('vcodec') != 'none' and f.get('acodec') == 'none':  # Video-only formats
+            video_formats.append(f)
+        elif f.get('acodec') != 'none' and f.get('vcodec') == 'none':  # Audio-only formats
+            audio_formats.append(f)
+        elif f.get('vcodec') != 'none' and f.get('acodec') != 'none':  # Combined formats
+            # Treat as video format for selection, but note it has audio
+            video_formats.append(f)
+    
+    # Select best video under 1080p
+    best_video = None
+    for v in video_formats:
+        if v.get('width') is not None and v['width']  <= max_w:
+            vb = v.get('bitrate', 0)
+            bvb = best_video.get('bitrate', 0) if best_video else 0
+            if best_video is None or vb >= bvb:
+                best_video = v
+    
+    # Select best audio
+    best_audio = None
+    for a in audio_formats:
+        if best_audio is None or a.get('bitrate', 0) >= best_audio.get('bitrate', 0):
+            best_audio = a
+    
+    return best_video, best_audio
+
+def get_yt_dlp_otions(url, max_w):
+    info = get_formats(url)
+    formats = info['formats']
+    best_video, best_audio = select_best_formats(formats, max_w)
+    mapping = {
+        'info': info,
+        'best_video_fmt': best_video,
+        'best_audio_fmt': best_audio,
+        'best_video_fmt_id': best_video['format_id'],
+        'best_audio_fmt_id': best_audio['format_id']
+    }
+    return mapping
+    info, best_video_fmt, best_audio_fmt, best_video_fmt_id, best_audio_fmt_id
+    return info, best_video, best_audio, best_video['format_id'], best_audio['format_id']
+    if best_video and best_audio:
+        # If best_video is a combined format, we might not need separate audio
+        if best_video.get('acodec') != 'none':
+            # This format already includes audio, so we can use it alone
+            format_code = str(best_video['format_id'])
+        else:
+            # Need to merge video and audio
+            format_code = f"{best_video['format_id']}+{best_audio['format_id']}"
+        print(f"Download command: yt-dlp -f '{format_code}' {url}")
+    else:
+        print("Could not find suitable formats.")
+        return None, None
+    return format_code
+
+if __name__ == '__main__':
+    url = input("Enter the video URL: ")
+    main(url)

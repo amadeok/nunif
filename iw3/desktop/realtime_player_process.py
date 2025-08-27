@@ -37,6 +37,9 @@ from global_hotkeys import register_hotkeys, start_checking_hotkeys
 
 
 
+
+
+
 class HLSEncoder:
     def __init__(self, input_f, output_dir, args, ff_hls_time=6, ff_hls_list_size=0):
         self.input_file = input_f
@@ -60,6 +63,11 @@ class HLSEncoder:
         #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
 
+        # ytdlp_options = 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best'
+        # self.ytdlp_video_options = 'bestvideo[height<=1080][ext=mp4]/bestvideo[height<=1080]/bestvideo' 
+        # self.ytdlp_audio_options = 'bestaudio[ext=m4a]/bestaudio'
+        self.using_ytdlp = is_url(self.input_file)
+
         pipe_id = str(uuid.uuid4())[:8]
 
         self.decode_audio_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_audio_mpv_ipc_pipe___{pipe_id}'
@@ -75,12 +83,20 @@ class HLSEncoder:
         self.decode_video_mpv_proc = None
         self.interpolate_process = None
 
-        cap = cv2.VideoCapture(self.input_file)
-        self.video_info = int(cap.get(3)), int(cap.get(4)), cap.get(5)
-        self.width, self.height, self.fps = self.video_info
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.video_duration = frame_count / self.fps
-        cap.release()
+        if not self.using_ytdlp:
+            cap = cv2.VideoCapture(self.input_file)
+            video_info = int(cap.get(3)), int(cap.get(4)), cap.get(5)
+            self.width, self.height, self.fps = video_info
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            self.video_duration = frame_count / self.fps
+            cap.release()
+        else:
+            self.yt_dlp_info = get_yt_dlp_otions(self.input_file, 1920)
+            video_fmt = self.yt_dlp_info["best_video_fmt"]
+            audio_fmt = self.yt_dlp_info["best_audio_fmt"]
+            self.width, self.height, self.fps = video_fmt["width"],video_fmt["height"],video_fmt["fps"]
+            self.video_duration = self.yt_dlp_info["info"]["duration"]
+            # info = download_url_to_temp(self.input_file, f'{audio_fmt["format_id"]}', True, True )
         self.sync_queue = queue.Queue()
         
         #####interpolation
@@ -143,7 +159,9 @@ class HLSEncoder:
         
         self.decoded_audio_frames_n = ThreadSafeValue[int](0)
         self.decoded_video_frames_n = ThreadSafeValue[int](0)
-        self.keyframes =  get_keyframes(self.input_file)
+        
+        #     sub yt-dlp -f [format_code] -g [URL]
+        self.keyframes =  get_keyframes(self.input_file) if not self.using_ytdlp else []#self.input_file if not self.using_ytdlp else video_fmt["url"])
 
 
         # self.output_dir =os.path.join(os.path.expandvars("%APPDATA%"), output_dir)# os.path.abspath(output_dir)
@@ -152,14 +170,7 @@ class HLSEncoder:
 
         print("Outdir", self.output_dir)
 
-        cap = cv2.VideoCapture(self.input_file)
-        self.video_info = int(cap.get(3)), int(cap.get(4)), cap.get(5)
-        self.width, self.height, self.fps = self.video_info
-        frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        self.video_duration = frame_count / self.fps
-        # self.pixel_format = get_video_pixel_format_ffprobe(self.input_file)
-        cap.release()
-
+        # # self.pixel_format = get_video_pixel_format_ffprobe(self.input_file)
 
         self.running = False
 
@@ -174,25 +185,12 @@ class HLSEncoder:
         self.is_paused = False
         self.last_req_seg_n = 0
         self.newest_seg_n = 0
-        
-        def my_click_callback(x, y):
-            perc = (x / notepad_hwnd.width)*100
-            seek_absolute_perc(perc, self.mpv_ipc_control_pipe)
-
-        # self.handler = WindowClickHandler()
-
-        # notepad_hwnd :gw.Window = find_window_by_title("Notepad++")
-        # if not notepad_hwnd:
-        #     print("Notepad++ window not found!")
-        #     exit()
-
-        # self.handler.set_click_callback(notepad_hwnd, my_click_callback)
 
         def toggle_print_debug(): 
             self.print_debug()
             self.b_print_debug = not self.b_print_debug
 
-        bindings = [["window + f2", None, lambda:self.seek_perc_at_keyframe(get_number()), False],
+        bindings = [["window + f2", None, lambda:self.seek(get_number()), False],
                     ["window + f11", None, toggle_print_debug, False],
                     ["window + f12", None, self.stop_all, False]
                     ]
@@ -205,7 +203,7 @@ class HLSEncoder:
                 time.sleep(10)
                 perc = random.uniform(0, 80)
                 print("----> seeking", perc, " ---")
-                self.seek_perc_at_keyframe(perc)
+                self.seek(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
         #threading.Thread(target=test, daemon=True).start()
@@ -216,12 +214,17 @@ class HLSEncoder:
                                            get_info_fun=lambda: {"playback_time": self._last_playback_time,
                                                                  "duration": self.video_duration,
                                                                  "lambda": True},
-                                           seek_fun=lambda perc: self.seek_perc_at_keyframe(perc))
+                                           seek_fun=lambda perc: self.seek(perc))
             
         threading.Thread(target=start_seekbar, daemon=True).start()
         
 
-    
+    def seek(self, percentage):
+        if self.using_ytdlp:
+            seek_time = (percentage/100)*self.video_duration
+            self.__seek(seek_time)
+        else:
+            self.seek_perc_at_keyframe(percentage)
     
     def get_output_fps(self):
         if self.using_interpolator:
@@ -336,7 +339,17 @@ class HLSEncoder:
 
     def __seek(self, time_):
         sl= 0.1
+        # for p in self.decode_video_mpv_ipc_pipe_name,self.decode_audio_mpv_ipc_pipe_name: pause_unpause("pause", p)
+        # time.sleep(0.1)
         pipes = self.decode_video_mpv_ipc_pipe_name,#self.decode_audio_mpv_ipc_pipe_name,
+        
+        print("waiting for queues to be full")
+        for q in self.decode_video_queue,self.decode_audio_queue: 
+            while not q.full(): 
+                time.sleep(0.1)
+                print("waiting for queues to be full",self.decode_video_queue.qsize(),self.decode_audio_queue.qsize() )        
+        print("queues are full")
+
         print("killing audio decode mpv..")
         self.quit_audio_decode_mpv()
         self.audio_thread.join()
@@ -351,7 +364,7 @@ class HLSEncoder:
             for p in pipes:
                 pause_unpause("pause", p)
                 
-            time.sleep(sl)
+            #time.sleep(sl)
 
             # print("Emptying queues..")
 
@@ -464,7 +477,7 @@ class HLSEncoder:
             self.mpv_bin,
             self.input_file,
             '--no-config',
-            "--hr-seek=no",
+            # "--hr-seek=no",
             f"--start={self.__seek_start_time}",
             # "--oacopts=ar=44100,ac=2",  # Sample rate: 44.1kHz, Channels: 2 (stereo)
             f"--af=format=srate={self.audio_sample_rate}",  # ,ac={self.audio_channels}",
@@ -473,7 +486,9 @@ class HLSEncoder:
             "-o",
             "-",  # Output to stdout
             "--input-ipc-server=" + self.decode_audio_mpv_ipc_pipe_name,
-            "--msg-level=all=warn",
+            f"--msg-level=all={self.mpv_log_levels['audio_decode']}",
+            *([f'--ytdl-format={self.yt_dlp_info["best_audio_fmt"]["format_id"]}', ] if self.using_ytdlp else ["--hr-seek=no"])
+
         ]
 
         try:
@@ -521,13 +536,14 @@ class HLSEncoder:
             self.mpv_bin, self.input_file, '--no-config',
             f"--start={self.__seek_start_time if self.restart_mpv_decode_on_seek else 0}",  
             *([f"--sid={self.subtitle_id}", "--vf=sub"] if self.subtitle_id != None else  []),
-            "--hr-seek=no",
+            # "--hr-seek=no",
             "--ovc=rawvideo",
             f"--vf=format=fmt=rgb24",  # ,fps={self.fps}",
             "--of=rawvideo",  
             "--input-ipc-server=" + self.decode_video_mpv_ipc_pipe_name,
             "-o",  "-",
             f"--msg-level=all={self.mpv_log_levels['video_decode']}",
+            *([f'--ytdl-format={self.yt_dlp_info["best_video_fmt"]["format_id"]}'] if self.using_ytdlp else ["--hr-seek=no"])
         ]
 
         try:
@@ -1091,7 +1107,7 @@ class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
                 )
                 return
                         
-            self.vp.seek_perc_at_keyframe(round(seek_position))
+            self.vp.seek(round(seek_position))
             response_data = {
                 "success": True, 
                 "message": f"Seeked to {seek_position}%",

@@ -29,73 +29,30 @@ TORCH_NUM_THREADS = torch.get_num_threads()
 from .utils import init_num_threads, get_local_address, is_private_address
 
 
-import tempfile
-from urllib.parse import urlparse
-import yt_dlp
-
-def is_url(string):
-    try:
-        result = urlparse(string)
-        return all([result.scheme, result.netloc])
-    except Exception:
-        return False
-
-def download_url_to_temp(url, cleanup_on_failure=True):
-    temp_dir = os.path.join( tempfile.gettempdir(), "iw3_downloads")# mkdtemp()
-    
-    try:
-        ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'quiet': True,
-            'no_warnings': False,
-            'format': 'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best',
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            
-            downloaded_file = ydl.prepare_filename(info)
-            
-            return {
-                'success': True,
-                'file_path': downloaded_file,
-                'temp_dir': temp_dir,
-                'info': info
-            }
-            
-    except Exception as e:
-        if cleanup_on_failure:
-            try:  shutil.rmtree(temp_dir)
-            except:   pass
-        
-        return {
-            'success': False,
-            'file_path': None,
-            'temp_dir': temp_dir if not cleanup_on_failure else None,
-            'error': str(e)
-        }
 
         
 def iw3_desktop_main_hls(args):
+
     
-    if is_url(args.input):
-        file_path = download_url_to_temp(args.input, False)
-        if file_path:
-            args.input = file_path["file_path"]
-            print(f"Downloaded file: {file_path}")
-        else:
-            print("Download failed")
-    else:
-        print("Not a valid URL")
-        if not args.input or  not path.isfile(args.input):
-            print("File not found:", args.input)
-            exit()
-        
+    # if is_url(args.input):
+    #     pass
+    #     # file_path = download_url_to_temp(args.input, False)
+    #     # if file_path:
+    #     #     args.input = file_path["file_path"]
+    #     #     print(f"Downloaded file: {file_path}")
+    #     # else:
+    #     #     print("Download failed")
+    # else:
+    #     print("Not a valid URL")
+    #     if not args.input or  not path.isfile(args.input):
+    #         print("File not found:", args.input)
+    #         exit()
     init_num_threads(args.gpu[0])
     c = Counter()
 
-
     args.device = create_device(args.gpu)
+    
+    vp = HLSEncoder(args.input, args.segment_folder, args=args)
 
     depth_model = args.state["depth_model"]
     print("Model: ", depth_model.model_type)
@@ -114,7 +71,7 @@ def iw3_desktop_main_hls(args):
         device_id=args.gpu[0],
     )
 
-    vp = HLSEncoder(args.input, args.segment_folder, args=args)
+
     vp.start()
     
     def loop():
@@ -154,7 +111,7 @@ def iw3_desktop_main_hls(args):
 
                 # time.sleep(0.001)
 
-                if count % (30 * vp.video_info[2]) == 0:
+                if count % (30 * vp.fps) == 0:
                     gc_collect()
                     
             count += 1
