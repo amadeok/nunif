@@ -14,6 +14,8 @@ from typing import Literal, Tuple
 import cv2
 import numpy as np
 import torch
+
+from .realtime_player_seek_gui import SeekBarApp
 print("torch", torch.__version__)
 from concurrent.futures import  Future
 from performanceTimer import Counter
@@ -51,7 +53,9 @@ class HLSEncoder:
         ###
         
         self.b_print_debug = False
-        self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "interpolate": "error", "encode":"info" }
+        # default_level = "info" if self.args.output_mode == "hls_ffmpeg" else "status"
+        default_level = "warning" if self.args.output_mode == "hls_ffmpeg" else "info"
+        self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "interpolate": "error", "encode":default_level }
         #mpv log level: fatal error warn info status v debug trace
         #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
@@ -110,7 +114,7 @@ class HLSEncoder:
         # self.audio_dec, self.audio_int = math.modf(self.audio_bytes_per_frame)
 
         self.audio_dec = self.audio_bytes_per_frame % self.audio_bytes_per_sample_and_channel
-        self.audio_int = round(math.ceil(self.audio_bytes_per_frame) - self.audio_dec)
+        self.audio_int = round(self.audio_bytes_per_frame - self.audio_dec)
         self.last_extra_audio_frame = 0#time.time()
         ####
         
@@ -135,7 +139,7 @@ class HLSEncoder:
         # self.queue_audio_drop_frame = ThreadSafeValue[int](0)
         self.__seek_start_time = 0
         self.__stop_all = False
-
+        self._last_playback_time = 0
         
         self.decoded_audio_frames_n = ThreadSafeValue[int](0)
         self.decoded_video_frames_n = ThreadSafeValue[int](0)
@@ -206,7 +210,19 @@ class HLSEncoder:
                 # sid+=1
         #threading.Thread(target=test, daemon=True).start()
         httpd = start_http_server(self.output_dir, self)
+    
+        def start_seekbar():
+            self.seek_bar_gui = SeekBarApp(port=self.args.port,
+                                           get_info_fun=lambda: {"playback_time": self._last_playback_time,
+                                                                 "duration": self.video_duration,
+                                                                 "lambda": True},
+                                           seek_fun=lambda perc: self.seek_perc_at_keyframe(perc))
+            
+        threading.Thread(target=start_seekbar, daemon=True).start()
         
+
+    
+    
     def get_output_fps(self):
         if self.using_interpolator:
             return self.fps * self.interpolation_multiplier 
@@ -223,19 +239,27 @@ class HLSEncoder:
 
     def check_segment_delta(self):
         while not self.__stop_all:
-            self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
+            if self.args.output_mode == "hls_ffmpeg":
+                self.newest_seg_n = get_most_recent_seg_n(self.output_dir)
 
-            if self.newest_seg_n is not None and self.last_req_seg_n is not None:
-                self.seg_delta = self.newest_seg_n - self.last_req_seg_n
+                if self.newest_seg_n is not None and self.last_req_seg_n is not None:
+                    self.seg_delta = self.newest_seg_n - self.last_req_seg_n
 
-                if self.seg_delta >= self.seg_delta_pause_thres:
-                    print("- Pausing", self.seg_delta, " -")
-                    self.is_paused = True
-                    # pause_unpause('pause', self.encode_mpv_pipe_name)
-                else:
-                    print("- Resuming", self.seg_delta, " -")
-                    self.is_paused = False
-                    # pause_unpause('unpause', self.encode_mpv_pipe_name)
+                    if self.seg_delta >= self.seg_delta_pause_thres:
+                        print("- Pausing", self.seg_delta, " -")
+                        self.is_paused = True
+                        # pause_unpause('pause', self.encode_mpv_pipe_name)
+                    else:
+                        print("- Resuming", self.seg_delta, " -")
+                        self.is_paused = False
+                        # pause_unpause('unpause', self.encode_mpv_pipe_name)
+            for x in range(10):
+                time.sleep(0.1)
+                if self.__stop_all: break
+                
+    def check_playback_time(self):
+        while not self.__stop_all:
+            self._last_playback_time = self.get_playback_time() or 1
             for x in range(10):
                 time.sleep(0.1)
                 if self.__stop_all: break
@@ -260,7 +284,7 @@ class HLSEncoder:
 
 
     def seek_perc_at_keyframe(self,perc ):
-        if not perc:
+        if perc == None :
             print("no percentage provided")
             return 
         def get_element_at_percentage(percentage, lst):
@@ -273,7 +297,7 @@ class HLSEncoder:
         print("%", perc,  "target_time", target_time, "index", index)
         self.__seek(target_time)
 
-
+    def get_playback_time(self):  return get_property_partial("playback-time", self.decode_video_mpv_ipc_pipe_name)
 
     def print_data(self):
         qs = self.queue_sizes()
@@ -558,7 +582,7 @@ class HLSEncoder:
                 #     self.last_extra_audio_frame = time.time()
                 #     for x in range(de+1):
                 #         self.sync_queue.put(1)
-            print("---- sync queue", self.sync_queue.qsize(), " ----")
+            print("\r---- sync queue", self.sync_queue.qsize(), " ----", end="")
         # amount = self.interpolation_multiplier if self.interpolation_multiplier > 1 else 1
         # if  1 or self.sync_queue.qsize() < 3:
         # for x in range(de if de > 2 else 1):
@@ -985,6 +1009,7 @@ class HLSEncoder:
             self.interpolate_thread = threading.Thread(target=self.interpolator, daemon=True)
         self.encode_thread = threading.Thread(target=self.encoder, daemon=True)
         self.segment_thread = threading.Thread( target=self.check_segment_delta, daemon=True)
+        threading.Thread( target=self.check_playback_time, daemon=True).start()
         
         self.audio_thread.start()
         self.video_thread.start()
@@ -995,13 +1020,24 @@ class HLSEncoder:
         self.encode_thread.start()
         self.segment_thread.start()
 
-import os
+
 from http.server import SimpleHTTPRequestHandler, HTTPServer
-import threading
+# import os
+# import threading
+# import shutil
+
+import json
+from http.server import SimpleHTTPRequestHandler
 
 class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
+        # Handle custom JSON routes first
+
+        if self.path == '/api/info':
+            self.handle_info_api()
+            return
+        
         print(f"Requested file: {self.path}")  # Log the requested path
         
         # If root path is requested, serve index.html instead of master.m3u8
@@ -1014,18 +1050,88 @@ class LoggingHTTPRequestHandler(SimpleHTTPRequestHandler):
 
         super().do_GET()
 
+    def do_POST(self):
+        # Handle custom POST routes
+        if self.path == '/api/seek':
+            self.handle_seek_api()
+            return
+        
+        # If no custom route matched, return 404
+        self.send_error(404, "POST endpoint not found")
+
+    def handle_info_api(self):
+        try:
+            response_data = {
+                "playback_time" : self.vp._last_playback_time,
+                "duration": self.vp.video_duration
+            }
+            self.send_json_response(response_data)
+        except Exception as e:
+            self.send_json_response({"error": str(e)}, status_code=500)
+
+    def handle_seek_api(self):
+        try:
+            # Get the content length
+            content_length = int(self.headers.get('Content-Length', 0))
+            
+            # Read the POST data
+            post_data = self.rfile.read(content_length)
+            
+            # Parse JSON data
+            data = json.loads(post_data.decode('utf-8'))
+            
+            # Extract seek position (percentage)
+            seek_position = float(data.get('position', 0))
+            
+            # Validate seek position
+            if not 0 <= seek_position <= 100:
+                self.send_json_response(
+                    {"error": "Seek position must be between 0 and 100"}, 
+                    status_code=400
+                )
+                return
+                        
+            self.vp.seek_perc_at_keyframe(round(seek_position))
+            response_data = {
+                "success": True, 
+                "message": f"Seeked to {seek_position}%",
+                "position": seek_position
+            }
+            self.send_json_response(response_data, status_code=501)
+            return
+                
+            self.send_json_response(response_data)
+            
+        except json.JSONDecodeError:
+            self.send_json_response({"error": "Invalid JSON data"}, status_code=400)
+        except ValueError:
+            self.send_json_response({"error": "Invalid position value"}, status_code=400)
+        except Exception as e:
+            self.send_json_response({"error": str(e)}, status_code=500)
+
+    def send_json_response(self, data, status_code=200):
+        """Helper method to send JSON responses"""
+        self.send_response(status_code)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        
+        # Convert data to JSON and encode as bytes
+        json_data = json.dumps(data, indent=2)
+        self.wfile.write(json_data.encode('utf-8'))
+
     def end_headers(self):
         # Add CORS headers if needed
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         super().end_headers()
 
 def start_http_server(output_dir, vp):
     # Change to the output directory so the server serves from there
     import sys
-    os.__file__
     try:
-        
-        shutil.copy(os.path.join( os.path.dirname(os.path.abspath(__file__)),"index.html"), output_dir)
+        shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "index.html"), output_dir)
     except Exception as e:
         print("Error copying index", e)
     os.chdir(output_dir)
@@ -1040,6 +1146,7 @@ def start_http_server(output_dir, vp):
     
     def run_server():
         print(f"Serving HLS stream at http://localhost:{vp.args.port}/")
+        print(f"API endpoints: http://localhost:{vp.args.port}/api/status")
         print(f"Make sure you have an index.html file in {output_dir}")
         httpd.serve_forever()
 

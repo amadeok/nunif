@@ -4,7 +4,6 @@ from .utils import (
     init_win32,
     create_parser, set_state_args,
     iw3_desktop_main,
-    iw3_desktop_main_hls
 )
 
 
@@ -17,10 +16,7 @@ def cli_main():
     parser = create_parser()
     args = parser.parse_args()
     set_state_args(args)
-    if args.hls:
-        iw3_desktop_main_hls(args)    
-    else:
-        iw3_desktop_main(args, init_wxapp=True)
+    iw3_desktop_main(args, init_wxapp=True)
 
 
 if __name__ == "__main__":

@@ -411,8 +411,23 @@ def get_video_pixel_format_ffprobe(video_path):
         return f'Error: {e}'
     except FileNotFoundError:
         return 'ffprobe not found. Please install FFmpeg.'
+    
+def get_property(property):
+    command = {  "command": ["get_property", property]  }
+    return json.dumps(command) + '\n'
 
-            
+def get_property_partial(property, pipe_path=None, read_response=True):
+        
+    response = send_cmd(get_property(property), pipe_path, read_response=read_response)
+    val  = None
+    if response and 'data' in response:
+        val = response['data']
+        #print(f"Current playback speed: {current_speed}x")
+    else:
+        print(f"Failed to retrieve {property} property")
+
+    return val
+
 def get_pipe_bytes_available(pipe_handles):
     results = []
     
