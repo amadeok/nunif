@@ -293,8 +293,11 @@ def send_cmd(cmd, pipe_path=None, read_response=False):
             response = json.loads(data_.decode())
         else:
             response = None
-        win32file.CloseHandle(handle)
-    else: return None
+    else: 
+        response =  None
+    if "handle" in locals():
+        try:  win32file.CloseHandle(handle)
+        except Exception  as e:print("Error closing handle")
     return response
 
 

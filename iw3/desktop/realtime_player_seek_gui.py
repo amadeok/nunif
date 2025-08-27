@@ -4,16 +4,17 @@ import threading
 import time
 
 class SeekBarApp:
-    def __init__(self, root=None, port=8123, get_info_fun=None, seek_fun=None):
-        if not root: 
-            self.root = tk.Tk()
+    def __init__(self, root=None, port=8123, get_info_fun=None, seek_fun=None, seek_relative_fun=None):
+        
+        self.root = tk.Tk()if not root else root
+        
         self.port = port
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
         
         self.screen_width = self.root.winfo_screenwidth()
         self.screen_height = self.root.winfo_screenheight()
-        self.window_width = self.screen_width // 2
+        self.window_width = self.screen_width 
         self.window_height = 60
         self.root.geometry(f"{self.window_width}x{self.window_height}+0+0")
         
@@ -22,35 +23,77 @@ class SeekBarApp:
         self.detection_height = self.window_height+20  # Area height to detect cursor
         self.get_info_fun = get_info_fun
         self.seek_fun = seek_fun
+        self.seek_relative_fun = seek_relative_fun
+        # Option 2: Use grid for more precise control
+        main_frame = tk.Frame(root, bg="green")
+        main_frame.pack(side="left", expand=True, fill='x', padx=0, pady=5)
         
-        self.seek_var = tk.DoubleVar()
-        self.seek_scale = tk.Scale(
-            root,
-            from_=0,
-            to=1000,
-            orient='horizontal',
-            showvalue=False,
-            # command=self.on_slider_interaction,
-            sliderlength=20,
-            width=self.window_height-10,
-            troughcolor='#4d4d4d',
-            bg='#333333',
-            fg='white',
-            variable=self.seek_var,
-            highlightthickness=0
-        )      
-        self.seek_scale.pack(fill='x', padx=10, pady=5)
+        main_frame.grid_columnconfigure(0, weight=1)
+        main_frame.grid_columnconfigure(1, weight=1)
+        
+        containers :list[tk.Frame] = [None, None]
+        dummy_color = "#2c2c2c"
+        proportion = (1,20)
+        for x in range(2):
+            containers[x] = tk.Frame(main_frame, bg="blue")
+            containers[x].grid(row=0, column=x, sticky="nsew")#(side="left", expand=True, fill='x', padx=2, pady=5)
+            # containers[x].pack(side="left", expand=True, fill='x', padx=2, pady=5)
+            containers[x].grid_columnconfigure(0, weight=proportion[0])
+            containers[x].grid_columnconfigure(1, weight=proportion[1])
+            containers[x].grid_columnconfigure(2, weight=proportion[0])
+            # containers[x].grid_rowconfigure(0, weight=1)  # Add this line
+            
+            dummy_widget = tk.Frame(containers[x],  bg=dummy_color)# bg='#4d4d4d')
+            dummy_widget.grid(row=0, column=0, sticky='nsew')
+            
+            if x == 0:
+                self.seek_var = tk.DoubleVar()
 
+                self.seek_scale = tk.Scale(
+                    containers[x], from_=0, to=1000, orient='horizontal',
+                    showvalue=False, sliderlength=20, width=self.window_height-10,
+                    troughcolor='#4d4d4d', bg='#333333', fg='white',
+                    variable=self.seek_var, highlightthickness=0
+                )      
+                self.seek_scale.grid(row=0, column=1, sticky='nsew', padx=(0, 0))
+            else:
+                dummy_widget_ = tk.Frame(containers[x],  bg='#4d4d4d', height=self.window_height-10)# bg='#4d4d4d')
+                dummy_widget_.grid(row=0, column=1, sticky='nsew')   
+
+            dummy_widget2 = tk.Frame(containers[x],  bg=dummy_color)# bg='#4d4d4d')
+            dummy_widget2.grid(row=0, column=2, sticky='nsew')
+        
         def update(e):
-            self.seek_scale.config( bg='#999999', troughcolor="#999999")
-            self.root.after(500, lambda: self.seek_scale.config( bg='#333333',troughcolor="#4d4d4d"))
+            def blink(color="#999999"):
+                self.seek_scale.config( bg=color, troughcolor=color)
+                self.root.after(500, lambda: self.seek_scale.config( bg='#333333',troughcolor="#4d4d4d"))
+                
             def task():
-                val = e.x / self.seek_scale.winfo_width() 
-                print("event", val)
-                self.on_slider_interaction(round(val*100))
+                
+                x = self.root.winfo_pointerx()
+                # val = x / self.screen_width
+                factor = proportion[0] / proportion[1]
+                padx = self.screen_width*factor
+                if x < padx:
+                    print("seek back")
+                    if self.seek_relative_fun: self.seek_relative_fun(-15)
+                    else: print("relative seek not implemented")
+                    blink("red")
+                elif x > self.screen_width-padx:
+                    print("seek forward")
+                    if self.seek_relative_fun: self.seek_relative_fun(15)
+                    else: print("relative seek not implemented")
+                    blink("blue")
+                else:
+                    # xx = x+padx
+                    val = (x-padx)*(1+(factor*2)) / self.root.winfo_width() 
+                    # val = e.x / root.winfo_width() 
+                    print("event", val)
+                    blink()
+                    self.on_slider_interaction(round(val*100))
             threading.Thread(target=task, daemon=True).start()
 
-        self.seek_scale.bind("<Button-1>",  update)
+        self.root.bind("<Button-1>",  update)
 
         self.last_position = 0
         self.mouse_in_detection_area = False

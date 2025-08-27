@@ -70,8 +70,8 @@ class HLSEncoder:
 
         pipe_id = str(uuid.uuid4())[:8]
 
-        self.decode_audio_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_audio_mpv_ipc_pipe___{pipe_id}'
-        self.decode_video_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_video_mpv_ipc_pipe___{pipe_id}'
+        self.decode_audio_mpv_ipc_pipe_name = None# f'\\\\.\\pipe\\iw3_decode_audio_mpv_ipc_pipe___{pipe_id}'
+        self.decode_video_mpv_ipc_pipe_name = None# f'\\\\.\\pipe\\iw3_decode_video_mpv_ipc_pipe___{pipe_id}'
         self.encode_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_encode_mpv_ipc_pipe___{pipe_id}'
         self.interpolate_ipc_control_pipe = f"\\\\.\\pipe\\iw3_rife_output_ipc_pipe___{pipe_id}"
 
@@ -138,7 +138,7 @@ class HLSEncoder:
         # audio_buffer_frames_n = self.audio_sample_rate / round_fps
         self.decode_audio_queue = queue.Queue(maxsize=round_fps)
         self.decode_video_queue = queue.Queue(maxsize=round_fps)
-        self.encode_video_queue = queue.Queue(maxsize=10) #1 because otherwise interpolation will cause audio shift 
+        self.encode_video_queue = queue.Queue(maxsize=1) #1 because otherwise interpolation will cause audio shift, bigger number causes desync with ytdlp also
         # self.interpolate_output_queue = queue.Queue(maxsize=10)
         self.interpolate_input_queue =  queue.Queue(maxsize=10)
         
@@ -151,7 +151,7 @@ class HLSEncoder:
         self.pipe = None
         self.interpolate_output_pipe_handle = None
 
-        # self.seeking_flag = ThreadSafeValue[bool](False)
+        self.seeking_flag = ThreadSafeValue[bool](False)
         # self.queue_audio_drop_frame = ThreadSafeValue[int](0)
         self.__seek_start_time = 0
         self.__stop_all = False
@@ -214,13 +214,21 @@ class HLSEncoder:
                                            get_info_fun=lambda: {"playback_time": self._last_playback_time,
                                                                  "duration": self.video_duration,
                                                                  "lambda": True},
-                                           seek_fun=lambda perc: self.seek(perc))
+                                           seek_fun=lambda perc: self.seek(perc),
+                                           seek_relative_fun = lambda change: self.seek_relative(change)
+                                           )
             
         threading.Thread(target=start_seekbar, daemon=True).start()
         
-
+    def seek_relative(self, change_seconds):
+        seek_time = self._last_playback_time  + change_seconds
+        if  self.using_ytdlp  or len(self.keyframes):
+            self.__seek(seek_time)
+        else:
+            self.seek_to_closest_keyframe(seek_time)
+            
     def seek(self, percentage):
-        if self.using_ytdlp:
+        if self.using_ytdlp  or len(self.keyframes):
             seek_time = (percentage/100)*self.video_duration
             self.__seek(seek_time)
         else:
@@ -262,7 +270,8 @@ class HLSEncoder:
                 
     def check_playback_time(self):
         while not self.__stop_all:
-            self._last_playback_time = self.get_playback_time() or 1
+            if not self.seeking_flag.get():
+                self._last_playback_time = self.get_playback_time() or 1
             for x in range(10):
                 time.sleep(0.1)
                 if self.__stop_all: break
@@ -285,6 +294,16 @@ class HLSEncoder:
         os.makedirs(self.output_dir, exist_ok=True)
 
 
+    def seek_to_closest_keyframe(self, target_time):
+        if target_time is None:
+            print("no time provided")
+            return
+    
+        closest_keyframe = min(self.keyframes, key=lambda x: abs(x - target_time))
+        closest_index = self.keyframes.index(closest_keyframe)
+        
+        print(f"Target time: {target_time}, Closest keyframe: {closest_keyframe}, Index: {closest_index}")
+        self.__seek(closest_keyframe)
 
     def seek_perc_at_keyframe(self,perc ):
         if perc == None :
@@ -339,6 +358,7 @@ class HLSEncoder:
 
     def __seek(self, time_):
         sl= 0.1
+        self.seeking_flag.set(True)
         # for p in self.decode_video_mpv_ipc_pipe_name,self.decode_audio_mpv_ipc_pipe_name: pause_unpause("pause", p)
         # time.sleep(0.1)
         pipes = self.decode_video_mpv_ipc_pipe_name,#self.decode_audio_mpv_ipc_pipe_name,
@@ -387,6 +407,8 @@ class HLSEncoder:
             self.video_thread.start()
         self.audio_thread = threading.Thread(target=self.audio_decoder, daemon=True)
         self.audio_thread.start()
+        threading.Timer(.1, lambda: self.seeking_flag.set(False)).start()
+        
         
 
     def quit_audio_decode_mpv(self):
@@ -400,7 +422,8 @@ class HLSEncoder:
         except Exception as e:print("Error closing decode video mpv stdout handle", e)
         
     def quit_encode_mpv(self):
-
+        self.decode_audio_queue.put(None)
+        self.decode_video_queue.put(None)
         res = send_cmd({  "command": ["quit" ]  }, self.encode_mpv_ipc_pipe_name )
         time.sleep(.1)
         def close_stdin():
@@ -414,6 +437,9 @@ class HLSEncoder:
         t = threading.Timer(.2, close_pipe )
         t.start()
         t.join()
+        self.encode_process.wait()
+        for q in [self.decode_audio_queue,self.decode_video_queue]: 
+            while q.qsize(): q.get()
 
 
         
@@ -473,11 +499,14 @@ class HLSEncoder:
     def audio_decoder(self):
         """Spawn MPV instance for audio decoding."""
 
+        pipe_id = str(uuid.uuid4())[:8]
+        self.decode_audio_mpv_ipc_pipe_name = f'\\\\.\\pipe\\iw3_decode_audio_mpv_ipc_pipe___{pipe_id}'
+        
         audio_args =  [
             self.mpv_bin,
             self.input_file,
             '--no-config',
-            # "--hr-seek=no",
+             f"--hr-seek={'yes' if self.using_ytdlp else 'no'}",
             f"--start={self.__seek_start_time}",
             # "--oacopts=ar=44100,ac=2",  # Sample rate: 44.1kHz, Channels: 2 (stereo)
             f"--af=format=srate={self.audio_sample_rate}",  # ,ac={self.audio_channels}",
@@ -487,7 +516,7 @@ class HLSEncoder:
             "-",  # Output to stdout
             "--input-ipc-server=" + self.decode_audio_mpv_ipc_pipe_name,
             f"--msg-level=all={self.mpv_log_levels['audio_decode']}",
-            *([f'--ytdl-format={self.yt_dlp_info["best_audio_fmt"]["format_id"]}', ] if self.using_ytdlp else ["--hr-seek=no"])
+            *([f'--ytdl-format={self.yt_dlp_info["best_audio_fmt"]["format_id"]}', ] if self.using_ytdlp else [])
 
         ]
 
@@ -532,18 +561,23 @@ class HLSEncoder:
 
     def video_decoder(self):
         
+        
+        pipe_id = str(uuid.uuid4())[:8]
+
+        self.decode_video_mpv_ipc_pipe_name =  f'\\\\.\\pipe\\iw3_decode_video_mpv_ipc_pipe___{pipe_id}'
+        
         video_args = [ 
             self.mpv_bin, self.input_file, '--no-config',
             f"--start={self.__seek_start_time if self.restart_mpv_decode_on_seek else 0}",  
             *([f"--sid={self.subtitle_id}", "--vf=sub"] if self.subtitle_id != None else  []),
-            # "--hr-seek=no",
+             f"--hr-seek={'yes' if self.using_ytdlp else 'no'}",
             "--ovc=rawvideo",
             f"--vf=format=fmt=rgb24",  # ,fps={self.fps}",
             "--of=rawvideo",  
             "--input-ipc-server=" + self.decode_video_mpv_ipc_pipe_name,
             "-o",  "-",
             f"--msg-level=all={self.mpv_log_levels['video_decode']}",
-            *([f'--ytdl-format={self.yt_dlp_info["best_video_fmt"]["format_id"]}'] if self.using_ytdlp else ["--hr-seek=no"])
+            *([f'--ytdl-format={self.yt_dlp_info["best_video_fmt"]["format_id"]}'] if self.using_ytdlp else [])
         ]
 
         try:
@@ -583,7 +617,7 @@ class HLSEncoder:
                 self.decoded_video_frames_n.increment()
                 self.decode_video_queue.put(frame)
                 
-                # self.signal_audio_thread()
+                self.signal_audio_thread()
 
                 
         except Exception as e:
@@ -629,7 +663,7 @@ class HLSEncoder:
                 "--hwdec-codecs=all",
                 "--vo=gpu-next",
                 "--profile=fast",
-                # "--video-sync=desync",
+                # "--video-sync=display-resample-vdrop",
                 '--no-config', # Ignore user configurations for predictable behavior in scripts
                 # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
                 '--demuxer=rawvideo',
@@ -966,7 +1000,7 @@ class HLSEncoder:
                     bytes_written += written
                     
                 if not self.using_interpolator or fn % self.interpolation_multiplier == 0:
-                    self.signal_audio_thread()
+                    # self.signal_audio_thread()
                     audio_frame = self.decode_audio_queue.get()
                     audio_bytes_written = win32file.WriteFile(self.pipe, audio_frame)[1]
                     assert len(audio_frame) == audio_bytes_written
