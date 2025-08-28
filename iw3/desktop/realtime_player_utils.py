@@ -224,18 +224,6 @@ def set_track_by_id(track_type :Literal['audio', 'sub'], id, pipe_path):
     res = send_cmd(proc_cmd(command), pipe_path)
 
 
-def cycle_track(op: Literal['toggle', 'pause', 'unpause'], pipe_path=None):
-    if op== "toggle":
-        command = {  "command": ["cycle", "pause" ]  } 
-    elif op == "pause":
-        command = {  "command": ["set_property", "pause", True]  } 
-    elif op== "unpause":
-        command = {  "command": ["set_property", "pause", False]  } 
-    else:assert(0)
-    res = send_cmd(proc_cmd(command), pipe_path)
-    # print(res)
-    return res
-
 def pause_unpause(op: Literal['toggle', 'pause', 'unpause'], pipe_path=None):
     if op== "toggle":
         command = {  "command": ["cycle", "pause" ]  } 
@@ -536,7 +524,7 @@ def is_url(string):
         return False
     
 
-def download_url_to_temp(url, ytdlp_options, download=True, cleanup_on_failure=True):
+def download_url_to_temp(url, ytdlp_options="bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best", download=True, cleanup_on_failure=True):
     temp_dir = os.path.join( tempfile.gettempdir(), "iw3_downloads")# mkdtemp()
     
     try:
@@ -590,7 +578,18 @@ def select_best_formats(formats, max_w=1920):
     for a in audio_formats:
         if best_audio is None or a.get('bitrate', 0) >= best_audio.get('bitrate', 0):
             best_audio = a
-    
+            
+    if not best_audio:
+        smallest_width_video = None
+        for v in video_formats:
+            width = v.get('width')
+            if width is not None and width <= max_w:
+                if smallest_width_video is None or width < smallest_width_video.get('width'):
+                    smallest_width_video = v
+                    
+        print("No audio only yt-dlp format found, using video")
+        best_audio = smallest_width_video or  best_video
+        
     return best_video, best_audio
 
 def get_yt_dlp_otions(url, max_w):

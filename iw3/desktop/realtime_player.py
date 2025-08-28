@@ -1,9 +1,12 @@
 
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
+
+from iw3.desktop.realtime_player_utils import download_url_to_temp, is_url
 from .utils import (
     init_win32,
     set_state_args
@@ -33,20 +36,25 @@ from .utils import init_num_threads, get_local_address, is_private_address
         
 def iw3_desktop_main_hls(args):
 
-    
-    # if is_url(args.input):
-    #     pass
-    #     # file_path = download_url_to_temp(args.input, False)
-    #     # if file_path:
-    #     #     args.input = file_path["file_path"]
-    #     #     print(f"Downloaded file: {file_path}")
-    #     # else:
-    #     #     print("Download failed")
-    # else:
-    #     print("Not a valid URL")
-    #     if not args.input or  not path.isfile(args.input):
-    #         print("File not found:", args.input)
-    #         exit()
+    subprocess.check_call([
+        sys.executable, '-m', 'pip', 'install', '--upgrade', "yt-dlp"
+    ])
+
+    if args.download_first:
+        if is_url(args.input):
+            pass
+            file_path = download_url_to_temp(args.input)
+            if file_path:
+                args.input = file_path["file_path"]
+                print(f"Downloaded file: {file_path}")
+            else:
+                print("Download failed")
+        else:
+            print("Not a valid URL")
+            if not args.input or  not path.isfile(args.input):
+                print("File not found:", args.input)
+                exit()
+                
     init_num_threads(args.gpu[0])
     c = Counter()
 
@@ -139,12 +147,15 @@ def create_parser():
     # parser.add_argument("--input_file", type=str, help="input_file")
     parser.add_argument("--segment_folder", type=str, help="output for the video segment files ", default="hls_out")
     parser.add_argument("--nvenc-preset", type=str, help="nvenc preset", default="p1")
-    parser.add_argument("--cli-mode", type=int, help="cli mode", default=False)
+    # parser.add_argument("--cli-mode", type=int, help="cli mode", default=False)
     parser.add_argument("--int-mult", type=int, help="RIFE interpolation multiplier, 2 means twice the framerate", default=1)
     parser.add_argument("--output-mode", type=str,
                         help="local_mpv plays the output with mpv in the pc's screen, this is for use with Virtual Desktop, hls_ffmpeg streams the output in hls format with ffmpeg",
                         default="local_mpv", choices=['local_mpv', 'hls_ffmpeg'])
     parser.add_argument("--output-pix-fmt", type=str, help="output pixel format", default="yuv420p")
+    parser.add_argument("--auto-settings", type=bool, help="auto settings", default=False)
+    parser.add_argument("--download-first", type=int, help="download input links first instead of trying to use them in real time", default=1)
+    parser.add_argument("--sid", type=int, help="subtitle id for mpv, eg: 1", default=0)
     # parser.add_argument('--input_res_scale', 
     #                type=float,
     #                choices=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
