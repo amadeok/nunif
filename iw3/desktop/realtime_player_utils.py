@@ -579,16 +579,16 @@ def select_best_formats(formats, max_w=1920):
         if best_audio is None or a.get('bitrate', 0) >= best_audio.get('bitrate', 0):
             best_audio = a
             
-    if not best_audio:
-        smallest_width_video = None
-        for v in video_formats:
-            width = v.get('width')
-            if width is not None and width <= max_w:
-                if smallest_width_video is None or width < smallest_width_video.get('width'):
-                    smallest_width_video = v
-                    
-        print("No audio only yt-dlp format found, using video")
-        best_audio = smallest_width_video or  best_video
+    # if not best_audio:
+    #     smallest_width_video = None
+    #     for v in video_formats:
+    #         width = v.get('width')
+    #         if width is not None and width <= max_w:
+    #             if smallest_width_video is None or width < smallest_width_video.get('width'):
+    #                 smallest_width_video = v
+    #                 
+    #     print("No audio only yt-dlp format found, using video")
+    #     best_audio = smallest_width_video or  best_video
         
     return best_video, best_audio
 
@@ -601,7 +601,7 @@ def get_yt_dlp_otions(url, max_w):
         'best_video_fmt': best_video,
         'best_audio_fmt': best_audio,
         'best_video_fmt_id': best_video['format_id'],
-        'best_audio_fmt_id': best_audio['format_id']
+        'best_audio_fmt_id': best_audio['format_id'] if best_audio else None
     }
     return mapping
     info, best_video_fmt, best_audio_fmt, best_video_fmt_id, best_audio_fmt_id
@@ -620,6 +620,81 @@ def get_yt_dlp_otions(url, max_w):
         return None, None
     return format_code
 
-if __name__ == '__main__':
-    url = input("Enter the video URL: ")
-    main(url)
+
+def load_audio_to_pcm16(filename, sample_rate=48000, channels=2):
+
+    cmd = [
+        'ffmpeg',
+        '-i', filename,              # Input file
+        '-f', 's16le',               # Output format: signed 16-bit little-endian
+        '-acodec', 'pcm_s16le',      # Explicitly use 16-bit PCM
+        '-ar', str(sample_rate),     # Sample rate
+        '-ac', str(channels),        # Number of channels
+        '-vn',                       # No video
+        '-'                          # Output to stdout
+    ]
+
+    process = subprocess.Popen( cmd, stdout=subprocess.PIPE )
+    raw_audio, stderr = process.communicate()
+
+    if process.returncode != 0:
+        raise RuntimeError(f"FFmpeg error: {stderr.decode()}")
+    return raw_audio
+
+    audio_array = np.frombuffer(raw_audio, dtype=np.int16)
+    if channels > 1: audio_array = audio_array.reshape(-1, channels)
+    return audio_array, sample_rate
+
+
+
+def extract_subtitles(input_video, output_srt=None, stream_index=2):
+    if not output_srt:
+        with tempfile.NamedTemporaryFile(suffix='.srt', delete=False) as tmp:
+            output_srt = tmp.name
+    try:
+        cmd = [
+            'ffmpeg', '-i', input_video,
+            '-map', f'0:{stream_index}',
+             output_srt, '-y'  
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            print(f"✓ Subtitles extracted successfully to {output_srt}")
+            return output_srt
+        else:
+            print(f"✗ Error extracting subtitles: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"✗ Exception occurred: {e}")
+        return False
+
+
+def get_subtitle_streams(input_video):
+    try:
+        cmd = [ 'ffprobe', '-v', 'error', '-select_streams', 's',
+            '-show_entries', 'stream=index:stream_tags=language',
+            '-of', 'csv=p=0', input_video ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode == 0:
+            streams = result.stdout.strip().split('\n')
+            if streams and streams[0]:
+                print("Available subtitle streams:")
+                for stream in streams:
+                    if stream:
+                        print(f"  {stream}")
+                return streams
+            else:
+                print("No subtitle streams found")
+                return []
+        else:
+            print(f"Error checking subtitle streams: {result.stderr}")
+            return []
+            
+    except Exception as e:
+        print(f"Exception occurred: {e}")
+        return []

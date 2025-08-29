@@ -155,7 +155,7 @@ def create_parser():
     parser.add_argument("--output-pix-fmt", type=str, help="output pixel format", default="yuv420p")
     parser.add_argument("--auto-settings", type=bool, help="auto settings", default=False)
     parser.add_argument("--download-first", type=int, help="download input links first instead of trying to use them in real time", default=1)
-    parser.add_argument("--sid", type=int, help="subtitle id for mpv, eg: 1", default=0)
+    parser.add_argument("--subtitle", type=str, help="either a subtitle file, or an id to get it from the source file (eg: 2)", default=None)
     # parser.add_argument('--input_res_scale', 
     #                type=float,
     #                choices=[0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
