@@ -551,7 +551,7 @@ def get_formats(url):
         info = ydl.extract_info(url, download=False)
         return info
 
-def select_best_formats(formats, max_w=1920):
+def select_best_formats(formats, max_h=1080):
     video_formats = []
     audio_formats = []
     
@@ -567,12 +567,12 @@ def select_best_formats(formats, max_w=1920):
     # Select best video under 1080p
     best_video = None
     for v in video_formats:
-        if v.get('width') is not None and v['width']  <= max_w:
+        if v.get('height') is not None and v['height']  <= max_h:
             vb = v.get('bitrate', 0)
             bvb = best_video.get('bitrate', 0) if best_video else 0
             if best_video is None or vb >= bvb:
                 best_video = v
-    
+    if not best_video: best_video = video_formats[0]
     # Select best audio
     best_audio = None
     for a in audio_formats:
@@ -592,6 +592,51 @@ def select_best_formats(formats, max_w=1920):
         
     return best_video, best_audio
 
+
+def get_video_info(video_path):
+    # Command to run ffprobe
+    command = [
+        'ffprobe',
+        '-v', 'error',
+        '-select_streams', 'v:0',
+        '-show_entries', 'stream=width,height,r_frame_rate,duration',
+        '-of', 'json',
+        video_path
+    ]
+    
+    try:
+        # Run ffprobe and capture output
+        result = subprocess.run(command, capture_output=True, text=True, check=True)
+        # Parse JSON output
+        data = json.loads(result.stdout)
+        
+        # Extract video stream info
+        stream = data['streams'][0]
+        width = stream['width']
+        height = stream['height']
+        # FPS is stored as a fraction (e.g., "24/1")
+        fps = eval(stream['r_frame_rate'])
+        # Duration in seconds (float)
+        duration = float(stream.get('duration', 0))
+        
+        return width, height, fps,duration
+        return {
+            'width': width,
+            'height': height,
+            'fps': fps
+        }
+    
+    except subprocess.CalledProcessError as e:
+        print(f"Error running ffprobe: {e}")
+        return None, None, None
+    except (KeyError, IndexError) as e:
+        print(f"Error parsing ffprobe output: {e}")
+        return None, None, None
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        return None, None, None
+
+    
 def get_yt_dlp_otions(url, max_w):
     info = get_formats(url)
     formats = info['formats']
@@ -599,9 +644,9 @@ def get_yt_dlp_otions(url, max_w):
     mapping = {
         'info': info,
         'best_video_fmt': best_video,
-        'best_audio_fmt': best_audio,
-        'best_video_fmt_id': best_video['format_id'],
-        'best_audio_fmt_id': best_audio['format_id'] if best_audio else None
+        'best_audio_fmt': best_audio
+        # 'best_video_fmt_id': best_video['format_id'],
+        # 'best_audio_fmt_id': best_audio['format_id'] if best_audio else None
     }
     return mapping
     info, best_video_fmt, best_audio_fmt, best_video_fmt_id, best_audio_fmt_id

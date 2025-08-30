@@ -82,7 +82,8 @@ class HLSEncoder:
         self.decode_audio_mpv_proc = None
         self.decode_video_mpv_proc = None
         self.interpolate_process = None
-
+        
+        # self.dont_use_ytdlp_url = False
         if not self.using_ytdlp:
             cap = cv2.VideoCapture(self.input_file)
             video_info = int(cap.get(3)), int(cap.get(4)), cap.get(5)
@@ -91,11 +92,23 @@ class HLSEncoder:
             self.video_duration = frame_count / self.fps
             cap.release()
         else:
-            self.yt_dlp_info = get_yt_dlp_otions(self.input_file, 1920)
+            self.yt_dlp_info = get_yt_dlp_otions(self.input_file, 1080)
             video_fmt = self.yt_dlp_info["best_video_fmt"]
             audio_fmt = self.yt_dlp_info["best_audio_fmt"]
-            self.width, self.height, self.fps = video_fmt["width"],video_fmt["height"],video_fmt["fps"]
-            self.video_duration = self.yt_dlp_info["info"]["duration"]
+            # info  = self.yt_dlp_info["info"]
+            info = video_fmt.get("width", None),video_fmt.get("height", None),video_fmt.get("fps", None), self.yt_dlp_info["info"].get("duration",None)
+            
+            if not all(info):
+                print("yt-dlp format doesn't contain all info, trying ffprobe")
+                info = get_video_info(video_fmt["url"])
+            if not all(info):
+                # info = get_video_info(self.input_file)
+                # self.dont_use_ytdlp_url = True
+                print("ffprobe failed to get info") 
+                assert False
+            self.width, self.height, self.fps,self.video_duration = info
+            
+            # self.video_duration = self.yt_dlp_info["info"]["duration"]
 
             # info = download_url_to_temp(self.input_file, f'{audio_fmt["format_id"]}', True, True )
         self.sync_queue = queue.Queue()
@@ -211,9 +224,9 @@ class HLSEncoder:
             self.print_debug()
             self.b_print_debug = not self.b_print_debug
 
-        bindings = [["window + f2", None, lambda:self.seek(get_number()), False],
-                    ["window + f11", None, toggle_print_debug, False],
-                    ["window + f12", None, self.stop_all, False]
+        bindings = [["window + f11", None, lambda:self.seek(get_number()), False],
+                    ["window + f2", None, toggle_print_debug, False],
+                    ["window + f3", None, self.stop_all, False]
                     ]
         register_hotkeys(bindings)
         start_checking_hotkeys()
@@ -384,8 +397,8 @@ class HLSEncoder:
         if self.using_interpolator: self.stop_interpolator()
         
         for t_name in ["encode_thread", "audio_thread","video_thread", "interpolate_thread", "segment_thread"]:
-            thread_ : threading.Thread = getattr(self, t_name)
-            if thread_.is_alive():
+            thread_ : threading.Thread = getattr(self, t_name, None)
+            if thread_ and thread_.is_alive():
                 print(f"Joining {t_name} ")
                 thread_.join()
         print("---> Everthing stopped")
@@ -896,7 +909,7 @@ class HLSEncoder:
                 #"--hwdec-codecs=all",
                 #"--vo=gpu-next",
                 "--profile=fast",
-                # "--video-sync=display-resample-vdrop",
+                "--video-sync=display-resample",
                 '--no-config', # Ignore user configurations for predictable behavior in scripts
                 # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
                 '--demuxer=rawvideo',
