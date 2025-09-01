@@ -37,7 +37,48 @@ from global_hotkeys import register_hotkeys, start_checking_hotkeys
 
 
 
+class StoppableQueue:
+    STOPPED = 0
+    def __init__(self, maxsize=None):
+        self.q = queue.Queue(maxsize=maxsize)
+        self.stop_event = threading.Event()
+        self.put_count= ThreadSafeValue[int](0)
+    def get_put_count(self):return self.put_count.get()
+    
+    def reset_event(self): self.stop_event.clear()
 
+    def put(self, item, block=True, timeout=None):
+        """Put an item into the queue, respecting the stop event."""
+        while not self.stop_event.is_set():
+            try:
+                # if type(item) ==  bool and item == False:
+                #     print("false")
+                self.q.put(item, block=block, timeout=1 if timeout is None else timeout)
+                self.put_count.increment()
+                return True
+            except queue.Full:
+                if not block or (timeout is not None and timeout <= 0):
+                    return False#raise
+                continue
+        return False
+        raise queue.Full("Queue stopped")
+    
+    def qsize(self): return self.q.qsize()
+
+    def get(self, *args, **kwargs): return self.q.get(*args, **kwargs)
+    
+    def stoppable_get(self):
+        while not self.stop_event.is_set():
+            try:
+                return self.q.get(timeout=1)
+            except queue.Empty:
+                continue
+        return False
+        raise queue.Empty("Queue stopped")
+
+    def stop(self):
+        self.stop_event.set()
+        
 class HLSEncoder:
     def __init__(self, input_f, output_dir, args, ff_hls_time=6, ff_hls_list_size=0):
         self.input_file = input_f
@@ -57,7 +98,7 @@ class HLSEncoder:
         self.b_print_debug = False
         # default_level = "info" if self.args.output_mode == "hls_ffmpeg" else "status"
         default_level = "warning" if self.args.output_mode == "hls_ffmpeg" else "info"
-        self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "interpolate": "error", "encode": default_level }
+        self.mpv_log_levels = {"video_decode": "quiet", "audio_decode": "error", "interpolate": "error", "encode": default_level }
         #mpv log level: fatal error warn info status v debug trace
         #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
@@ -168,9 +209,9 @@ class HLSEncoder:
         
         round_fps = round(out_fps)
         # audio_buffer_frames_n = self.audio_sample_rate / round_fps
-        encode_queue_size = 1
-        self.decode_audio_queue = queue.Queue(maxsize=round(round_fps*1))
-        self.decode_video_queue = queue.Queue(maxsize=round_fps-encode_queue_size*0)
+        encode_queue_size = 10
+        self.decode_audio_queue = StoppableQueue(maxsize=round(round_fps*1))
+        self.decode_video_queue = StoppableQueue(maxsize=round_fps-encode_queue_size)
         self.encode_video_queue = queue.Queue(maxsize=encode_queue_size) #1 because otherwise interpolation will cause audio shift, bigger number causes desync with ytdlp also
         # self.interpolate_output_queue = queue.Queue(maxsize=10)
         self.interpolate_input_queue =  queue.Queue(maxsize=10)
@@ -191,8 +232,10 @@ class HLSEncoder:
         self._last_playback_time = 0
         self.__decoder_frame_number = 0
         
-        self.decoded_audio_frames_n = ThreadSafeValue[int](0)
-        self.decoded_video_frames_n = ThreadSafeValue[int](0)
+        # self.decoded_audio_frames_n = ThreadSafeValue[int](0)
+        # self.decoded_video_frames_n = ThreadSafeValue[int](0)
+        # self.emergency_video_frame = None
+        # self.emergency_audio_frame = None
         
         #   yt-dlp -f [format_code] -g [URL]
         self.keyframes =  get_keyframes(self.input_file) if not self.using_ytdlp else []#self.input_file if not self.using_ytdlp else video_fmt["url"])
@@ -234,14 +277,15 @@ class HLSEncoder:
         def test():
             sid = 1
             while 1:
-                time.sleep(10)
+                time.sleep(1)
                 perc = random.uniform(0, 80)
                 print("----> seeking", perc, " ---")
                 self.seek(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
-        #threading.Thread(target=test, daemon=True).start()
-        httpd = start_http_server(self.output_dir, self)
+        threading.Thread(target=test, daemon=True).start()
+        if self.args.output_mode =="hls_ffmpeg":
+            self.httpd = start_http_server(self.output_dir, self)
     
         def start_seekbar():
             self.seek_bar_gui = SeekBarApp(port=self.args.port,
@@ -263,6 +307,7 @@ class HLSEncoder:
             self.__seek(seek_time)
             
     def seek(self, percentage):
+        if not percentage: return
         if len(self.keyframes): #means we have a file, either downloaded or not
             self.seek_perc_at_keyframe(percentage)
         else:
@@ -281,7 +326,9 @@ class HLSEncoder:
         str_ =  f"q->  da: {self.decode_audio_queue.qsize():3d} dv: {self.decode_video_queue.qsize():3d} "
         str_ += f"ii: {self.interpolate_input_queue.qsize():3d} ev: {self.encode_video_queue.qsize():3d} "
         # str_ += f"ev: {self.encode_video_queue.qsize()} "
-        str_ += f"| v: {self.decoded_video_frames_n} a: {self.decoded_audio_frames_n} | "
+        # str_ += f"| v: {self.decoded_video_frames_n} a: {self.decoded_audio_frames_n} | "
+        str_ += f"| v: {self.decode_video_queue.get_put_count()} a: {self.decode_audio_queue.get_put_count()} | "
+        
         self.c.tick(str_)
 
     def check_segment_delta(self):
@@ -364,7 +411,7 @@ class HLSEncoder:
 
     def print_data(self):
         qs = self.queue_sizes()
-        print(f"------> {qs} | v: {self.decoded_video_frames_n} a: {self.decoded_audio_frames_n} <-------")
+        print(f"------> {qs} | v: {self.decode_video_queue.get_put_count()} a: {self.decode_audio_queue.get_put_count()} <-------")
 
     def queue_sizes(self):
         return  self.decode_video_queue.qsize(),self.decode_audio_queue.qsize()
@@ -404,27 +451,29 @@ class HLSEncoder:
         print("---> Everthing stopped")
 
     def __seek(self, time_):
+        if self.seeking_flag.get():
+            print("Already seeking.. aborting")
+            return
         sl= 0.1
         self.__seek_start_time = time_
-        # self.seeking_flag.set(True)
+        self.seeking_flag.set(True)
         self.new_frames_flag = Future()
         if self.use_single_ffmpeg_decoder:
             pause_unpause("pause", self.encode_mpv_ipc_pipe_name)
             
-            for q in self.decode_video_queue,self.decode_audio_queue: 
-                while not q.full(): 
-                    time.sleep(0.1)
-                    print("waiting for queues to be full",self.decode_video_queue.qsize(),self.decode_audio_queue.qsize() )        
-            print("queues are full") 
+            # for q in self.decode_video_queue,self.decode_audio_queue: 
+            #     while not q.full(): 
+            #         time.sleep(0.1)
+            #         print("waiting for queues to be full",self.decode_video_queue.qsize(),self.decode_audio_queue.qsize() )        
+            # print("queues are full") 
+            self.decode_audio_queue.stop()
+            self.decode_video_queue.stop()
             self.stop_ffmpeg_decoder()
-            # time.sleep(1)
-            # print("getting 1")
-            self.decode_audio_queue.get()
-            self.decode_video_queue.get()
-            # time.sleep(1)
             time.sleep(0.1)
-            self.audio_thread.join()
-            self.video_thread.join()
+            # time.sleep(1)
+            if self.audio_thread.is_alive(): self.audio_thread.join()
+            if self.video_thread.is_alive(): self.video_thread.join()
+            
             self.ffmpeg_decoder_thread = threading.Thread(target=self.ffmpeg_decoder, daemon=True)
             self.ffmpeg_decoder_thread.start()   
             self.new_frames_flag.result()
@@ -481,7 +530,7 @@ class HLSEncoder:
             if not self.safe_audio_mode:
                 self.audio_thread = threading.Thread(target=self.audio_decoder, daemon=True)
                 self.audio_thread.start()
-            # threading.Timer(.1, lambda: self.seeking_flag.set(False)).start()
+        threading.Timer(.1, lambda: self.seeking_flag.set(False)).start()
         
     def quit_audio_decode_mpv(self):
         res = send_cmd({  "command": ["quit" ]  }, self.decode_audio_mpv_ipc_pipe_name )
@@ -555,6 +604,7 @@ class HLSEncoder:
             print("safe_audio_decoder started ")
 
             while not self.__stop_all:
+                time.sleep(0.001)
                 # self.sync_queue.get()
                 emission, current_total = self.dec_accumulator.add_number(self.audio_dec)
                 audio_s = self.audio_int+(emission)
@@ -569,9 +619,9 @@ class HLSEncoder:
                         break
                 le = len(chunk)
                 assert le == audio_s
-                self.decoded_audio_frames_n.increment()
-                self.decode_audio_queue.put(chunk)
-                time.sleep(0.001)
+                # self.decoded_audio_frames_n.increment()
+                return self.decode_audio_queue.put(chunk)
+                
 
             # print(f"Audio: Received {len(self.audio_buffer)/1_000_000} MB {self.decode_audio_mpv_proc.poll()}")
 
@@ -623,28 +673,33 @@ class HLSEncoder:
         
         self.audio_decoder_loop()
         
+    def get_decoded_audio_frame(self, src):
+        emission, current_total = self.dec_accumulator.add_number(self.audio_dec)
+        audio_s = self.audio_int+(emission)
+        assert audio_s % self.audio_bytes_per_sample_and_channel == 0
+
+        chunk = read_frame_of_size(src, audio_s, audio_s)
+        if not chunk:
+                print("No data from mpv audio decoder, end of file?")
+                return False
+        le = len(chunk)
+        assert le == audio_s
+
+        put_in_queue  = self.decode_audio_queue.put(chunk)
+        # if put_in_queue:
+        #     self.decoded_audio_frames_n.increment()
+        return put_in_queue
+        
+        
+    
     def audio_decoder_loop(self, src):
         src = src or self.decode_audio_mpv_proc.stdout
 
         try:
             while not self.__stop_all:
                 # self.sync_queue.get()
-                emission, current_total = self.dec_accumulator.add_number(self.audio_dec)
-                audio_s = self.audio_int+(emission)
-                assert audio_s % self.audio_bytes_per_sample_and_channel == 0
-
-                chunk = read_frame_of_size(src, audio_s, audio_s)
-                if not chunk:
-                        print("No data from mpv audio decoder, end of file?")
-                        break
-                le = len(chunk)
-                assert le == audio_s
-
-                self.decoded_audio_frames_n.increment()
-                self.decode_audio_queue.put(chunk)
-                # print("audio")
-                time.sleep(0.001)
-
+                if not self.get_decoded_audio_frame(src):
+                    break
             # print(f"Audio: Received {len(self.audio_buffer)/1_000_000} MB {self.decode_audio_mpv_proc.poll()}")
 
         except Exception as e:
@@ -712,6 +767,41 @@ class HLSEncoder:
         
         self.video_decoder_loop()
 
+    def get_decoded_video_frame(self, src):
+        if self.new_frames_flag != None and not self.new_frames_flag.done():
+            # for x in range(3):
+            #     time.sleep(1)
+            #     print("Setting self.new_frames_flag result", self.decode_audio_queue.qsize(),self.decode_video_queue.qsize())
+            self.new_frames_flag.set_result(1)
+
+        data = read_frame_of_size(src, self.rgb_video_frame_size, self.rgb_video_frame_size )
+        if not data:
+            print("No data from mpv video decoder, end of file?")
+            return False
+        framergb = np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 3))
+
+        # if not framergb.flags.writeable:
+        #     framergb = copy.deepcopy( framergb)#.copy()  # Create a writable copy
+
+        frame_buffer = torch.from_numpy(framergb)
+
+        if self.cuda_stream is not None:
+            with torch.cuda.stream(self.cuda_stream):
+                frame = frame_buffer.to(self.args.device)
+                frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
+                self.cuda_stream.synchronize()
+        else:
+            frame = frame_buffer.to(self.args.device)
+            frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
+
+        
+        
+        put_in_queue =  self.decode_video_queue.put(frame)
+        if put_in_queue:
+            self.__decoder_frame_number +=1
+            # self.decoded_video_frames_n.increment()
+        return put_in_queue
+
     def video_decoder_loop(self, src=None):
         src = src or self.decode_video_mpv_proc.stdout
         try:
@@ -719,38 +809,9 @@ class HLSEncoder:
             while not self.__stop_all:
                 while self.is_paused:
                     time.sleep(0.1)
-                self.signal_audio_thread()
-                if self.new_frames_flag != None and not self.new_frames_flag.done():
-                    # for x in range(3):
-                    #     time.sleep(1)
-                    #     print("Setting self.new_frames_flag result", self.decode_audio_queue.qsize(),self.decode_video_queue.qsize())
-                    self.new_frames_flag.set_result(1)
-
-                data = read_frame_of_size(src, self.rgb_video_frame_size, self.rgb_video_frame_size )
-                if not data:
-                    print("No data from mpv video decoder, end of file?")
+                # self.signal_audio_thread()
+                if not self.get_decoded_video_frame(src):
                     break
-                framergb = np.frombuffer(data, dtype=np.uint8).reshape((self.height, self.width, 3))
-
-                # if not framergb.flags.writeable:
-                #     framergb = copy.deepcopy( framergb)#.copy()  # Create a writable copy
-
-                frame_buffer = torch.from_numpy(framergb)
-
-                if self.cuda_stream is not None:
-                    with torch.cuda.stream(self.cuda_stream):
-                        frame = frame_buffer.to(self.args.device)
-                        frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
-                        self.cuda_stream.synchronize()
-                else:
-                    frame = frame_buffer.to(self.args.device)
-                    frame = frame[:, :, 0:3][:, :, (2, 1, 0)].permute(2, 0, 1).contiguous() / 255.0
-
-                self.__decoder_frame_number +=1
-                self.decoded_video_frames_n.increment()
-                self.decode_video_queue.put(frame)
-                
-                # if not self.safe_audio_mode:
 
         except Exception as e:
             print(f"Video read error: {e}")
@@ -840,22 +901,73 @@ class HLSEncoder:
         win32pipe.ConnectNamedPipe(self.video_pipe, None)
         win32pipe.ConnectNamedPipe(self.audio_pipe, None)
         self.__decoder_frame_number = 0
-        
-        self.video_thread = threading.Thread(target=self.video_decoder_loop, args=(self.video_pipe,), daemon=True)
-        self.audio_thread = threading.Thread(target=self.audio_decoder_loop, args=(self.audio_pipe,), daemon=True)
-        self.video_thread.start()
-        self.audio_thread.start()
+        self.decode_video_queue.reset_event()
+        self.decode_audio_queue.reset_event()
+        from types import SimpleNamespace
+
+        obj = SimpleNamespace(video_queued=False, audio_queued=False)
+
+        info = None
+        try:
+            while not self.__stop_all:
+                while self.is_paused:
+                    time.sleep(0.1)
+                # self.signal_audio_thread()
+                obj.video_queued, obj.audio_queued = False, False
+                obj.video_queued =  self.get_decoded_video_frame(self.video_pipe)
+                obj.audio_queued =  self.get_decoded_audio_frame(self.audio_pipe)
+                info =f"{self.decode_video_queue.get_put_count()} {self.decode_audio_queue.get_put_count()} {obj.video_queued} {obj.audio_queued}" 
+
+                # print("info", info)
+                if not obj.video_queued or not obj.audio_queued:
+                    print("Breaking out of ffmpeg loop")
+                    break
+
+                    
+        except Exception as e:
+            print(f"Error ffmpeg decoder loop: {e}")
+        # finally:
+        try:
+            if obj.video_queued and not obj.audio_queued:
+                print("\n-------> Adding Extra audio frame\n")
+                self.decode_video_queue.get()
+                self.decode_video_queue.put_count.decrement()
+                obj.audio_queued = True
+            elif not obj.video_queued and obj.audio_queued:
+                print("\n-------> Adding Extra video frame\n")
+                self.decode_audio_queue.get()
+                self.decode_audio_queue.put_count.decrement()
+                obj.video_queued = True
+            if not (obj.audio_queued and obj.video_queued or not obj.audio_queued and not obj.video_queued):
+                print("Fail to sync queues")
+                self.stop_all()
+        except Exception as e:
+            print("Error syncing queues", e)
+
+        print(f"\nffmpeg decoder loop broke, {info}\n" )
+            # break
+            # print("ffmpeg decoder ended")
+        # self.video_thread = threading.Thread(target=self.video_decoder_loop, args=(self.video_pipe,), daemon=True)
+        # self.audio_thread = threading.Thread(target=self.audio_decoder_loop, args=(self.audio_pipe,), daemon=True)
+        # self.video_thread.start()
+        # self.audio_thread.start()
         # self.video_thread.join()
         # self.audio_thread.join()
               
     def stop_ffmpeg_decoder(self):
         print("Stopping ffmpeg decoder")
+        self.decode_audio_queue.stop()
+        self.decode_video_queue.stop()
         for pp in self.video_pipe, self.audio_pipe:
             def close_ffmpeg_decode_task(pipe = pp):
                 win32file.CloseHandle(pipe)
             threading.Thread(target=close_ffmpeg_decode_task, daemon=True).start()
-        self.ffmpeg_decoder_process.stdin.write(b"q\n")
-        self.ffmpeg_decoder_process.stdin.flush()
+        try:
+            self.ffmpeg_decoder_process.stdin.write(b"q\n")
+            self.ffmpeg_decoder_process.stdin.flush()
+        except Exception as e:
+            print("Error flushing ffmpeg stdin")
+        # time.sleep(0.1)
         self.ffmpeg_decoder_thread.join()
 
     def __ipc_mpv_seek(self, pipe, offset =0):
@@ -870,7 +982,9 @@ class HLSEncoder:
                 print("Error seeking to start position:", e)
 
     def signal_audio_thread(self):
-        de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
+        # de =  self.decoded_video_frames_n.get()-self.decoded_audio_frames_n.get()
+        de =  self.decode_video_queue.get_put_count()-self.decode_audio_queue.get_put_count()
+
         self.sync_queue.put(1)
         if de > 2 and self.sync_queue.qsize() < 3:
             self.sync_queue.put(1)
