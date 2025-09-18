@@ -283,7 +283,7 @@ class HLSEncoder:
                 self.seek(perc)
                 # set_track_by_id("sub", sid, self.decode_video_mpv_ipc_pipe_name)
                 # sid+=1
-        threading.Thread(target=test, daemon=True).start()
+        #threading.Thread(target=test, daemon=True).start()
         if self.args.output_mode =="hls_ffmpeg":
             self.httpd = start_http_server(self.output_dir, self)
     
@@ -1024,7 +1024,9 @@ class HLSEncoder:
                 #"--vo=gpu-next",
                 "--profile=fast",
                 "--video-sync=display-resample",
-                '--no-config', # Ignore user configurations for predictable behavior in scripts
+                '--no-config', 
+                "--osc=no",
+                "--fs",
                 # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
                 '--demuxer=rawvideo',
                 f'--demuxer-rawvideo-w={out_width}',
@@ -1034,7 +1036,7 @@ class HLSEncoder:
                 "--aid=1",
                 f'--audio-file={self.encode_mpv_pipe_name}', # Add external audio file
                 *rife_arg,#,format={self.output_pixel_format}',
-
+                # "--video-aspect-override=16:9",
                 '--input-ipc-server=' + self.encode_mpv_ipc_pipe_name,
                 f"--msg-level=all={self.mpv_log_levels['encode']}",
             ]
