@@ -98,7 +98,7 @@ class HLSEncoder:
         self.b_print_debug = False
         # default_level = "info" if self.args.output_mode == "hls_ffmpeg" else "status"
         default_level = "warning" if self.args.output_mode == "hls_ffmpeg" else "info"
-        self.mpv_log_levels = {"video_decode": "quiet", "audio_decode": "error", "interpolate": "error", "encode": default_level }
+        self.mpv_log_levels = {"video_decode": "quiet", "audio_decode": "error", "interpolate": "info", "encode": default_level }
         #mpv log level: fatal error warn info status v debug trace
         #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
@@ -1193,9 +1193,11 @@ class HLSEncoder:
             print(f"Error creating Windows named pipe: {e}")
         
         buffer_frames = ":".join([str(e) for e in self.vapoursynth_buffer_frames])
+
         cmd = [
             self.mpv_bin,
             '-',  # Read from stdin
+            "--no-config",
             # "--hwdec=auto-copy",
             # "--hwdec-codecs=all",
             # "--vo=gpu-next",
@@ -1203,23 +1205,25 @@ class HLSEncoder:
             f'--demuxer-rawvideo-w={out_width}',
             f'--demuxer-rawvideo-h={self.height}',
             '--demuxer-rawvideo-mp-format=bgr24',
-            # f'--demuxer-rawvideo-fps={self.fps}',
+            f'--demuxer-rawvideo-fps={self.fps}',
             f'--vf=vapoursynth=[{self.vsScriptPath}]:{buffer_frames},format={self.output_pixel_format}',
-            '--of=rawvideo',  # Output raw video
-            '--ovc=rawvideo',  # Raw video codec
-            f'--o={self.interpolate_output_pipe_name}',  # Write to named pipe
+             '--of=rawvideo',  # Output raw video
+             '--ovc=rawvideo',  # Raw video codec
+            f'--o={self.interpolate_output_pipe_name}',  
+            #'--o=test.mp4',  
             # "--vo=no",
             # "--ao=no",
-            f"--input-ipc-server={self.interpolate_ipc_control_pipe}",
+           f"--input-ipc-server={self.interpolate_ipc_control_pipe}",
             f"--msg-level=all={self.mpv_log_levels['interpolate']}"
         ]
         
         try:
-            print("Starting MPV process with stdin input and named pipe output...")
-            
-            self.running = True
-            self.interpolate_process = subprocess.Popen(    cmd,    stdin=subprocess.PIPE)#bufsize=self.frame_size*10   )
+            my_env = self.get_interpolation_env()                   
+            str_cmd = " ".join(cmd)
+            print(f"Starting MPV process with stdin input and named pipe output...\n {str_cmd}\n")
 
+            self.running = True
+            self.interpolate_process = subprocess.Popen(    cmd,    stdin=subprocess.PIPE, bufsize=int_frame_size*1,  env=my_env  )
 
             self.interpolate_started.set_result(True)
             print("Pipe reader thread waiting for connection...")
@@ -1297,11 +1301,7 @@ class HLSEncoder:
             bufsize = out_frame_size*3 if self.use_ffmpeg_encoder else 1024*1024 #1920*1080 half sbs 48 fps
             #maybe bufsize should be out_frame_size * framerate
             # bufsize = int(out_frame_size  * round(out_fps))
-            if self.args.output_mode == "local_mpv":
-                my_env = os.environ.copy()
-                target_env = os.getenv('pythonPath'.upper())
-                my_env["PATH"] = f"{target_env};{my_env['PATH']}"
-            else: my_env = None
+            my_env = self.get_encoder_env()
             
             self.encode_process = subprocess.Popen( cmd, stdin=subprocess.PIPE,
                                                     bufsize= bufsize, env=my_env  )#out_frame_size*3 for interpolation x2
@@ -1394,6 +1394,18 @@ class HLSEncoder:
             print(f"Encoder error: {e}")
             if self.encode_process:
                 self.encode_process.kill()
+
+    def get_encoder_env(self):
+        if self.args.output_mode == "local_mpv":
+            my_env = self.get_interpolation_env()
+        else: my_env = None
+        return my_env
+
+    def get_interpolation_env(self):
+        my_env = os.environ.copy()
+        target_env = os.getenv('pythonPath'.upper())
+        my_env["PATH"] = f"{target_env};{my_env['PATH']}"
+        return my_env
 
     def tensor_to_bgr_data(self, sbs):
         sbs = (sbs * 255).to(torch.uint8)
