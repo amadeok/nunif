@@ -95,10 +95,10 @@ class HLSEncoder:
         ###
         self.use_single_ffmpeg_decoder = True
         self.safe_audio_mode = False
-        self.b_print_debug = False
+        self.b_print_debug = 0
         # default_level = "info" if self.args.output_mode == "hls_ffmpeg" else "status"
         default_level = "warning" if self.args.output_mode == "hls_ffmpeg" else "info"
-        self.mpv_log_levels = {"video_decode": "quiet", "audio_decode": "error", "interpolate": "info", "encode": default_level }
+        self.mpv_log_levels = {"video_decode": "error", "audio_decode": "error", "interpolate": "info", "encode": default_level }
         #mpv log level: fatal error warn info status v debug trace
         #ffmpeg log levels:  quiet panic fatal error warning info verbose debug trace 
         assert shutil.which(self.mpv_bin)
@@ -862,7 +862,7 @@ class HLSEncoder:
         audio_input_args = ( (["-ss",  self.__seek_start_time ] if self.__seek_start_time != 0 else []) + ['-i', audio_input]) if audio_input else []
         
         if len(vf_video_args): vf_video_args.insert(0, "-vf")
-        
+        audio_stream_index = 0 #to do add ass arg
         ffmpeg_cmd = [
             'ffmpeg',
             # "-t", "10",
@@ -878,7 +878,7 @@ class HLSEncoder:
             *vf_video_args,
             self.ffmpeg_decoder_video_pipe,
             
-            '-map', '0:a',  # Process audio only
+            '-map', f'0:a:{audio_stream_index}',  # Process audio only
             '-acodec', codec_map[self.audio_bits_per_sample],
             '-ac', str(self.audio_channels),
             '-ar', str(self.audio_sample_rate),
@@ -1014,6 +1014,7 @@ class HLSEncoder:
 
             fmt_arg = f"format={self.output_pixel_format}"
             rife_arg = [f'--vf=vapoursynth=[{self.vsScriptPath}]:{buffer_frames},{fmt_arg}'] if self.interpolation_multiplier > 1 else [f"--vf={fmt_arg}"]
+            
             cmd = [
                 self.mpv_bin,
                 "-",
@@ -1065,7 +1066,7 @@ class HLSEncoder:
                         "-cq", "18",
                         "-b:v", "0",
                         "-bufsize", "20M",
-                        "-profile", "high"
+                        #"-profile", "high"
                     ]
 
                 if output_hls:
@@ -1081,6 +1082,34 @@ class HLSEncoder:
                 else:
                     hls_opts = ["-f", "mp4"]
 
+                # Calculate target dimensions for 16:9
+                target_aspect = 16 / 9
+                current_aspect = out_width / self.height
+
+                if abs(current_aspect - target_aspect) < 1e-6:
+                    # Already 16:9 — no padding needed
+                    pad_filter = None
+                else:
+                    # Determine whether to pad vertically (letterbox) or horizontally (pillarbox)
+                    if current_aspect > target_aspect:
+                        # Too wide → add top/bottom black bars (letterbox)
+                        pad_height = int(round(out_width / target_aspect))
+                        pad_width = out_width
+                        y_offset = (pad_height - self.height) // 2
+                        x_offset = 0
+                    else:
+                        # Too tall → add left/right black bars (pillarbox)
+                        pad_width = int(round(self.height * target_aspect))
+                        pad_height = self.height
+                        x_offset = (pad_width - out_width) // 2
+                        y_offset = 0
+
+                    pad_filter = f"pad=width={pad_width}:height={pad_height}:x={x_offset}:y={y_offset}:color=black"
+                vf_filters = []
+                if pad_filter:
+                    vf_filters.append(pad_filter)
+ 
+                vf_filters = ["-vf", *vf_filters ] if vf_filters else []
                 cmd = [
                     "ffmpeg",
                     *buf_settings,
@@ -1100,12 +1129,14 @@ class HLSEncoder:
                     "-keyint_min", f"{out_fps*self.ff_hls_time}",
                     "-r", str(out_fps),  # Output framerate
                     "-c:a", "aac",  # Audio codec (adjust as needed)
+                    *vf_filters,
                     *hls_opts,
                     *ofopts,
                     "-y",  # Overwrite output file
                     playlist_path if output_hls else f"{self.output_dir}/out_{self.target_time}.mp4",
                     "-loglevel",  self.mpv_log_levels['encode']
                 ]
+
 
                 # Remove empty strings if any
                 cmd = [arg for arg in cmd if arg]
