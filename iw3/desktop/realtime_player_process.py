@@ -201,7 +201,7 @@ class HLSEncoder:
         self.dec_accumulator = DecimalAccumulator(target=self.audio_bytes_per_sample_and_channel)
 
         # fps_o = self.get_output_fps()
-        audio_fps = self.get_output_fps()#(fps_o * self.interpolation_multiplier) if self.using_interpolator > 1 else fps_o#self.get_output_fps()
+        audio_fps = self.fps#self.get_output_fps()#(fps_o * self.interpolation_multiplier) if self.using_interpolator > 1 else fps_o#self.get_output_fps()
         samples_per_frame = self.audio_sample_rate / audio_fps
         self.audio_bytes_per_frame = samples_per_frame * self.audio_channels * self.audio_bytes_per_sample
         # self.audio_dec, self.audio_int = math.modf(self.audio_bytes_per_frame)
@@ -1377,7 +1377,7 @@ class HLSEncoder:
             dummy_audio_data.put(create_sine_wave_bytes(self.audio_bytes_per_second*3, self.audio_sample_rate))
 
             frames_written = 0
-            ss =  int(self.audio_bytes_per_second*(1.5/(self.interpolation_multiplier if self.using_interpolator else 1))) 
+            ss =  int(self.audio_bytes_per_second*(1.5/(self.interpolation_multiplier if self.using_interpolator and 0 else 1))) 
             # ss = int(self.audio_bytes_per_second*1.8 )
             while tot_audio_bytes_wr < ss:
                 wr  = write_audio(dummy_audio_data)
@@ -1389,10 +1389,10 @@ class HLSEncoder:
 
             dummy_image = bytearray([128] * out_frame_size)
 
-            dummy_frames_number  = frames_written*(self.interpolation_multiplier if self.using_interpolator else 1)
+            dummy_frames_number  = frames_written*(self.interpolation_multiplier if self.using_interpolator and 1 else 1)
             for x in range(dummy_frames_number):
                 ret = self.encode_process.stdin.write(dummy_image)
-                # print(f"{x} dummy v", ret)
+                print(f"{x} dummy v", ret)
             print("Encoder started")
 
             # de = deque(maxlen=150)
