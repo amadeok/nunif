@@ -148,6 +148,15 @@ class HLSEncoder:
                 print("ffprobe failed to get info") 
                 assert False
             self.width, self.height, self.fps,self.video_duration = info
+        
+        self.ori_fps = self.fps
+        if self.args.max_input_fps :
+            if  self.args.max_input_fps >= self.fps:
+                print("self.args.max_input_fps > self.fps, ignoring")
+            else:
+                self.fps = self.args.max_input_fps
+                print("Setting max input fps: ", self.fps)
+
             
             # self.video_duration = self.yt_dlp_info["info"]["duration"]
 
@@ -191,8 +200,9 @@ class HLSEncoder:
         self.audio_bytes_per_sample_and_channel = self.audio_channels * self.audio_bytes_per_sample
         self.dec_accumulator = DecimalAccumulator(target=self.audio_bytes_per_sample_and_channel)
 
-        out_fps = self.get_output_fps()# self.fps * self.interpolation_multiplier if self.interpolation_multiplier > 1 else self.fps
-        samples_per_frame = self.audio_sample_rate / self.fps
+        # fps_o = self.get_output_fps()
+        audio_fps = self.get_output_fps()#(fps_o * self.interpolation_multiplier) if self.using_interpolator > 1 else fps_o#self.get_output_fps()
+        samples_per_frame = self.audio_sample_rate / audio_fps
         self.audio_bytes_per_frame = samples_per_frame * self.audio_channels * self.audio_bytes_per_sample
         # self.audio_dec, self.audio_int = math.modf(self.audio_bytes_per_frame)
 
@@ -207,7 +217,7 @@ class HLSEncoder:
             print(f"Getting raw audio data took {time.time() -t:4.3f} secs, size: {len(self.audio_buffer)/(1000*1000):4.3f} MB")
         ####
         
-        round_fps = round(out_fps)
+        round_fps = round(self.get_output_fps())
         # audio_buffer_frames_n = self.audio_sample_rate / round_fps
         encode_queue_size = 10
         self.decode_audio_queue = StoppableQueue(maxsize=round(round_fps*1))
@@ -861,6 +871,9 @@ class HLSEncoder:
         
         audio_input_args = ( (["-ss",  self.__seek_start_time ] if self.__seek_start_time != 0 else []) + ['-i', audio_input]) if audio_input else []
         
+        if self.args.max_input_fps:
+            vf_video_args.insert(0, f"fps={self.args.max_input_fps}")
+            
         if len(vf_video_args): vf_video_args.insert(0, "-vf")
         audio_stream_index = 0 #to do add ass arg
         ffmpeg_cmd = [
@@ -1026,6 +1039,7 @@ class HLSEncoder:
                 "--profile=fast",
                 "--video-sync=display-resample",
                 '--no-config', 
+                f"""--input-conf=C:\\Users\{os.path.expandvars("%username%")}\\AppData\\Roaming\\mpv\\input.conf""",
                 "--osc=no",
                 "--fs",
                 # " --demuxer-lavf-o=thread_queue_size=50000,rtbufsize=20000000,probesize=1KB",
@@ -1108,6 +1122,8 @@ class HLSEncoder:
                 vf_filters = []
                 if pad_filter:
                     vf_filters.append(pad_filter)
+                # if self.args.max_input_fps:
+                #     vf_filters.append(f"fps={self.args.max_input_fps}")
  
                 vf_filters = ["-vf", *vf_filters ] if vf_filters else []
                 cmd = [

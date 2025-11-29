@@ -149,9 +149,11 @@ def create_parser():
     parser.add_argument("--nvenc-preset", type=str, help="nvenc preset", default="p1")
     # parser.add_argument("--cli-mode", type=int, help="cli mode", default=False)
     parser.add_argument("--int-mult", type=int, help="RIFE interpolation multiplier, 2 means twice the framerate", default=1)
+    parser.add_argument("--max-input-fps", type=int, help="drop input frames (for better performance), 0 = disable", default=0)
     parser.add_argument("--output-mode", type=str,
                         help="local_mpv plays the output with mpv in the pc's screen, this is for use with Virtual Desktop, hls_ffmpeg streams the output in hls format with ffmpeg",
                         default="local_mpv", choices=['local_mpv', 'hls_ffmpeg'])
+    
     parser.add_argument("--output-pix-fmt", type=str, help="output pixel format", default="yuv420p")
     parser.add_argument("--auto-settings", type=bool, help="auto settings", default=False)
     parser.add_argument("--download-first", type=int, help="download input links first instead of trying to use them in real time", default=1)
