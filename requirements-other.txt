@@ -1,0 +1,10 @@
+pywin32
+pygetwindow
+pyautogui
+pynput
+yt_dlp
+opencv-python==4.5.5.64
+wxPython
+requests
+keyboard
+global_hotkeys

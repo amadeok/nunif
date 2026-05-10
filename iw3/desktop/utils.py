@@ -26,9 +26,9 @@ from nunif.device import create_device
 from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
-from .realtime_player_process import HLSEncoder
-import numpy as np
-from performanceTimer import Counter
+# from .realtime_player_process import HLSEncoder
+# import numpy as np
+# from performanceTimer import Counter
 
 TORCH_VERSION = Version(torch.__version__)
 ENABLE_GPU_JPEG = (TORCH_VERSION.major, TORCH_VERSION.minor) >= (2, 7)
@@ -57,7 +57,7 @@ def init_num_threads(device_id):
         # cpu
         torch.set_num_threads(TORCH_NUM_THREADS)
     else:
-        torch.set_num_threads(1)
+        torch.set_num_threads(2)
 
 
 def get_local_address():

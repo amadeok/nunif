@@ -23,7 +23,7 @@ from nunif.models import compile_model
 from nunif.models.data_parallel import DeviceSwitchInference
 from nunif.initializer import gc_collect
 from .realtime_player_process import HLSEncoder
-from performanceTimer import Counter
+from performanceTimer import Counter, ccc
 
 TORCH_VERSION = Version(torch.__version__)
 ENABLE_GPU_JPEG = (TORCH_VERSION.major, TORCH_VERSION.minor) >= (2, 7)
@@ -54,9 +54,9 @@ def iw3_desktop_main_hls(args):
             if not args.input or  not path.isfile(args.input):
                 print("File not found:", args.input)
                 exit()
-                
+    
     init_num_threads(args.gpu[0])
-    c = Counter()
+    
 
     args.device = create_device(args.gpu)
     
@@ -90,7 +90,7 @@ def iw3_desktop_main_hls(args):
             print("------> Stopping all <--------")
             vp.stop_all()
     
-    threading.Thread(target=loop, daemon=True).start()
+    # threading.Thread(target=loop, daemon=True).start()
     
     try:
         if args.compile:
@@ -103,7 +103,8 @@ def iw3_desktop_main_hls(args):
         
         while not vp.has_stopped():
             with args.state["args_lock"]:
-                
+                # with ccc():
+
                 frame =  vp.decode_video_queue.get()
 
                 if type(frame) != torch.Tensor and not frame:
@@ -114,13 +115,12 @@ def iw3_desktop_main_hls(args):
                 sbs = IW3U.process_image(frame, args, depth_model, side_model)
                 # c.ct(1)
                 if vp.b_print_debug:vp.print_debug()
-
                 output_queue.put(sbs)
 
                 # time.sleep(0.001)
 
-                if count % (30 * vp.fps) == 0:
-                    gc_collect()
+                # if count % (30 * vp.fps) == 0:
+                #     gc_collect()
                     
             count += 1
             if args.state["stop_event"] and args.state["stop_event"].is_set():
@@ -177,8 +177,10 @@ def create_parser():
 
 
 def cli_main():
-    import sys
+    # import sys
+    assert torch.cuda.is_available(), "CUDA is required for this player"
     init_win32()
+
     # if  "cli-mode" in sys.argv or 1:        
     parser = create_parser()
     args = parser.parse_args()
